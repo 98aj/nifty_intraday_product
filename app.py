@@ -154,7 +154,7 @@ def _bootstrap() -> None:
     st.session_state.setdefault("initial_capital", 500_000.0)
     st.session_state.setdefault("trade_lots", 1)
     st.session_state.setdefault("premium_stop_pct", 40)
-    st.session_state.setdefault("premium_target_pct", 50)
+    st.session_state.setdefault("premium_target_pct", 60)
     st.session_state.setdefault("machine_paused", False)
     st.session_state.setdefault("live_armed", False)
     st.session_state.setdefault("flash", "")
