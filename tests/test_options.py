@@ -96,8 +96,8 @@ def test_manage_exit_stop_target_and_flatten() -> None:
     assert manage_exit(100, 59, 60, 150, morning) == "PREMIUM_STOP"
     assert manage_exit(100, 150, 60, 150, morning) == "PREMIUM_TARGET"
     assert manage_exit(100, 110, 60, 150, morning) is None
-    late = datetime(2026, 10, 12, 15, 15, tzinfo=IST)
-    assert manage_exit(100, 110, 60, 150, late) == "SQUARE_OFF_1515"
+    late = datetime(2026, 10, 12, 15, 0, tzinfo=IST)
+    assert manage_exit(100, 110, 60, 150, late) == "SQUARE_OFF_1500"
 
 
 def test_parse_chain_reads_upstox_leg() -> None:

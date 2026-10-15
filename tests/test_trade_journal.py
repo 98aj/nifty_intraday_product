@@ -6,7 +6,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from config.settings import IST
-from modules.journal.trade_journal import TradeJournal
+from modules.journal.trade_journal import TradeJournal, max_drawdown
 from modules.risk.risk_manager import PaperTradingBroker
 
 
@@ -71,6 +71,54 @@ def test_journal_keeps_paper_and_does_not_duplicate_an_open_row(tmp_path: Path) 
     assert sheet.iloc[0]["Mode"] == "Paper"
     assert sheet.iloc[0]["Status"] == "Open"
     assert sheet.iloc[0]["Sell price"] == ""
+
+
+def test_drawdown_is_the_drop_from_the_highest_account_value(tmp_path: Path) -> None:
+    journal = TradeJournal(tmp_path)
+    first = _buy("PAPER")
+    journal.record(first)
+    first_close = dict(first)
+    first_close.update(
+        {
+            "status": "CLOSED",
+            "ExitPrice": 150.0,
+            "ExitTimestamp": datetime(2026, 10, 12, 11, 0, tzinfo=IST).isoformat(),
+            "RealizedPL": 1000.0,
+            "exit_reason": "PREMIUM_TARGET",
+        }
+    )
+    journal.record(first_close)
+
+    second = _buy("PAPER")
+    second["Timestamp"] = datetime(2026, 10, 13, 10, 5, tzinfo=IST).isoformat()
+    second["Ticker"] = "NIFTY 22600 CE 13 OCT 26"
+    journal.record(second)
+    second_close = dict(second)
+    second_close.update(
+        {
+            "status": "CLOSED",
+            "ExitPrice": 40.0,
+            "ExitTimestamp": datetime(2026, 10, 13, 12, 0, tzinfo=IST).isoformat(),
+            "RealizedPL": -400.0,
+            "exit_reason": "PREMIUM_STOP",
+        }
+    )
+    journal.record(second_close)
+
+    sheet = journal.table(10_000)
+    assert sheet.iloc[0]["Drawdown"] == 0
+    assert sheet.iloc[0]["Drawdown %"] == 0
+    assert sheet.iloc[1]["Drawdown"] == 400
+    assert sheet.iloc[1]["Drawdown %"] == 3.64
+    assert max_drawdown(sheet) == (400, 3.64)
+
+    still_open = _buy("PAPER")
+    still_open["Timestamp"] = datetime(2026, 10, 14, 10, 5, tzinfo=IST).isoformat()
+    still_open["Ticker"] = "NIFTY 22700 CE 14 OCT 26"
+    journal.record(still_open)
+    opened = journal.table(10_000)
+    assert opened.iloc[2]["Drawdown"] == ""
+    assert opened.iloc[2]["Drawdown %"] == ""
 
 
 def test_broker_close_is_written_into_the_journal(tmp_path: Path) -> None:

@@ -221,7 +221,7 @@ class PaperTradingBroker:
         return closed_rows
 
     def force_square_off(self, ltp_by_ticker: dict[str, float] | None = None, reason: str = "FORCE_SQUARE_OFF_1500") -> int:
-        """Close every open paper row at mark. Used at 15:00 so we never wait for 15:15."""
+        """Close every open paper row at mark. The options desk flattens at 15:00 IST."""
 
         prices = ltp_by_ticker or {}
         with self._lock:

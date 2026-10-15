@@ -8,7 +8,7 @@ After 09:30 IST it buys **one** weekly ATM option when Nifty breaks the 09:15–
 - break down → buy the ATM **put**
 - still inside the range → no trade
 
-The position is sold on a premium stop, a premium target, or at **15:15 IST**. Short options are never sold to open. One new option per day. Lot size comes from the Upstox contract (currently 65).
+The position is sold on a premium stop, a premium target, or at **15:00 IST**. Short options are never sold to open. One new option per day. Lot size comes from the Upstox contract (currently 65).
 
 ```powershell
 python -m streamlit run app.py

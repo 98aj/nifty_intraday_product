@@ -1,7 +1,7 @@
 """Automated Nifty weekly options desk.
 
 Paper or Live. The machine buys one ATM call or put after the Nifty opening
-range breaks, then sells it on a premium stop, a premium target, or 15:15 IST.
+range breaks, then sells it on a premium stop, a premium target, or 15:00 IST.
 
 `streamlit run app.py`
 """
@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
 
 from config.settings import IST, PROJECT_ROOT, Settings, load_settings
 from modules.copilot.option_quality import load_option_quality, quality_allows, quality_summary
-from modules.journal.trade_journal import TradeJournal
+from modules.journal.trade_journal import TradeJournal, max_drawdown
 from modules.options.backtest import replay_option_rule
 from modules.options.selector import (
     FLATTEN_AT,
@@ -126,7 +126,7 @@ def render_desk() -> None:
 
     book_tab, backtest_tab = st.tabs(["Trades", "Test"])
     with book_tab:
-        _render_book(broker)
+        _render_book(broker, capital)
     with backtest_tab:
         _render_backtest(settings, capital, lots, stop_frac, target_frac)
 
@@ -386,17 +386,20 @@ def _today_story(
     return ("Waiting", why or "The machine is watching Nifty.", "wait")
 
 
-def _render_book(broker: PaperTradingBroker) -> None:
+def _render_book(broker: PaperTradingBroker, capital: float) -> None:
     journal = TradeJournal()
     journal.backfill(broker.open_positions() + broker.closed_positions())
-    sheet = journal.table()
+    sheet = journal.table(capital)
     closed_pl = 0.0
     if not sheet.empty and "Result" in sheet.columns:
         closed_pl = pd.to_numeric(sheet["Result"], errors="coerce").fillna(0).sum()
-    st.caption(
-        f"{len(sheet)} trades in the journal · finished result ₹{closed_pl:,.0f} · "
-        "paper and live both go in this sheet"
-    )
+    drop, drop_pct = max_drawdown(sheet)
+    st.caption(f"{len(sheet)} trades in the journal · paper and live both go in this sheet")
+    result_col, drop_col, pct_col = st.columns(3)
+    result_col.metric("Finished result", f"₹{closed_pl:,.0f}")
+    drop_col.metric("Drawdown", f"₹{drop:,.0f}")
+    pct_col.metric("Drawdown %", f"{drop_pct:.2f}%")
+    st.caption("Drawdown is the largest drop from the highest account value, using the starting capital above.")
     if sheet.empty:
         st.info("No trades yet. Each paper or live trade is written into data/trade_journal.xlsx.")
     else:
@@ -415,7 +418,7 @@ def _exit_words(value: object) -> str:
     return {
         "PREMIUM_STOP": "Price fell to the stop",
         "PREMIUM_TARGET": "Price hit the target",
-        "SQUARE_OFF_1515": "Sold at 3:15 pm",
+        "SQUARE_OFF_1500": "Sold at 3:00 pm",
         "EMERGENCY_CLOSE": "Closed by hand",
     }.get(str(value or ""), str(value or ""))
 

@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from math import floor
 
 ENTRY_END = time(14, 30)
-FLATTEN_AT = time(15, 15)
+FLATTEN_AT = time(15, 0)
 
 
 @dataclass(frozen=True)
@@ -246,7 +246,7 @@ def entry_allowed(now: datetime, index_side: str) -> tuple[bool, str]:
     if clock < time(9, 30):
         return False, "Opening range is still building. No option until 09:30 IST."
     if clock >= ENTRY_END:
-        return False, "Entry window is closed (14:30 IST). Open options flatten at 15:15."
+        return False, "Entry window is closed (14:30 IST). Open options flatten at 15:00."
     if index_side not in {"BUY", "SELL"}:
         return False, "Nifty is still inside the opening range. No option yet."
     return True, "ok"
@@ -256,7 +256,7 @@ def manage_exit(entry_premium: float, ltp: float, stop_premium: float, target_pr
     """Why a long option should be sold, or None to hold."""
 
     if _clock(now) >= FLATTEN_AT:
-        return "SQUARE_OFF_1515"
+        return "SQUARE_OFF_1500"
     if ltp > 0 and stop_premium > 0 and ltp <= stop_premium:
         return "PREMIUM_STOP"
     if ltp > 0 and target_premium > 0 and ltp >= target_premium:

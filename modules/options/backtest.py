@@ -82,10 +82,10 @@ def _session(day, options, session, equity, capital, risk_pct, stop_frac, target
         return None
     stop = entry * (1.0 - stop_frac)
     target = entry * (1.0 + target_frac)
-    after = series[(series["timestamp"] > entry_time) & (series["timestamp"].dt.time < time(15, 15))]
+    after = series[(series["timestamp"] > entry_time) & (series["timestamp"].dt.time < time(15, 0))]
     exit_price = float(after.iloc[-1]["close"]) if not after.empty else entry
     exit_time = after.iloc[-1]["timestamp"] if not after.empty else entry_time
-    reason = "SQUARE_OFF_1515"
+    reason = "SQUARE_OFF_1500"
     for _, bar in after.iterrows():
         if float(bar["low"]) <= stop:
             exit_price, exit_time, reason = stop, bar["timestamp"], "PREMIUM_STOP"

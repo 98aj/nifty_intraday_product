@@ -9,7 +9,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -37,6 +37,8 @@ COLUMNS = [
     "Stop",
     "Target",
     "Result",
+    "Drawdown",
+    "Drawdown %",
     "Why sold",
     "Order id",
 ]
@@ -44,6 +46,7 @@ COLUMNS = [
 _EXIT_WORDS = {
     "PREMIUM_STOP": "Price fell to the stop",
     "PREMIUM_TARGET": "Price hit the target",
+    "SQUARE_OFF_1500": "Sold at 3:00 pm",
     "SQUARE_OFF_1515": "Sold at 3:15 pm",
     "EMERGENCY_CLOSE": "Closed by hand",
     "STOP": "Price fell to the stop",
@@ -85,30 +88,58 @@ class TradeJournal:
         for position in positions:
             self.record(position)
 
-    def table(self) -> pd.DataFrame:
-        rows = [{column: row.get(column, "") for column in COLUMNS} for row in self._load()]
-        return pd.DataFrame(rows, columns=COLUMNS)
+    def table(self, capital: float | None = None) -> pd.DataFrame:
+        rows, stored = self._read()
+        used = stored if capital is None else float(capital)
+        if rows and (used != stored or not self._excel_has_drawdown()):
+            self._save(rows, used)
+        return pd.DataFrame(_with_drawdown(rows, used), columns=COLUMNS)
 
     def _load(self) -> list[dict]:
+        rows, _capital = self._read()
+        return rows
+
+    def _read(self) -> tuple[list[dict], float]:
         if not self.json_path.exists():
-            return []
+            return [], 0.0
         try:
             payload = json.loads(self.json_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             LOGGER.exception("Trade journal could not be read")
-            return []
-        rows = payload.get("trades") if isinstance(payload, dict) else payload
-        return [row for row in rows or [] if isinstance(row, dict)]
+            return [], 0.0
+        if isinstance(payload, dict):
+            rows = payload.get("trades")
+            try:
+                capital = float(payload.get("capital") or 0)
+            except (TypeError, ValueError):
+                capital = 0.0
+        else:
+            rows = payload
+            capital = 0.0
+        return [row for row in rows or [] if isinstance(row, dict)], capital
 
-    def _save(self, rows: list[dict]) -> None:
+    def _save(self, rows: list[dict], capital: float | None = None) -> None:
+        if capital is None:
+            _rows, capital = self._read()
         self.json_path.write_text(
-            json.dumps({"trades": rows}, indent=2),
+            json.dumps({"trades": rows, "capital": capital}, indent=2),
             encoding="utf-8",
         )
         try:
-            self.xlsx_path.write_bytes(_workbook(rows))
+            self.xlsx_path.write_bytes(_workbook(_with_drawdown(rows, capital)))
         except OSError:
             LOGGER.exception("Excel journal is locked. The trade is saved and will be written when the file is free.")
+
+    def _excel_has_drawdown(self) -> bool:
+        if not self.xlsx_path.exists():
+            return False
+        try:
+            book = load_workbook(self.xlsx_path, read_only=True, data_only=True)
+            headers = [cell.value for cell in next(book.active.iter_rows(max_row=1))]
+            book.close()
+        except (OSError, StopIteration):
+            return False
+        return "Drawdown" in headers and "Drawdown %" in headers
 
 
 def _key(position: dict) -> str:
@@ -160,6 +191,53 @@ def _stamp(value: object) -> datetime | None:
     return stamp.astimezone(IST)
 
 
+def max_drawdown(sheet: pd.DataFrame) -> tuple[float, float]:
+    """Largest drop from the high, as rupees and the percentage at that same point."""
+
+    if sheet.empty or "Drawdown" not in sheet.columns:
+        return 0.0, 0.0
+    values = pd.to_numeric(sheet["Drawdown"], errors="coerce")
+    percents = pd.to_numeric(sheet["Drawdown %"], errors="coerce")
+    usable = values.notna()
+    if not usable.any():
+        return 0.0, 0.0
+    values = values.where(usable, 0.0)
+    percents = percents.where(usable, 0.0)
+    worst = percents.idxmax()
+    if float(percents.loc[worst] or 0) == 0:
+        worst = values.idxmax()
+    return round(float(values.loc[worst]), 2), round(float(percents.loc[worst]), 2)
+
+
+def _with_drawdown(rows: list[dict], capital: float) -> list[dict]:
+    """Rupee and percent drop from the highest account value after each closed trade."""
+
+    equity = float(capital) if capital > 0 else 0.0
+    peak = equity
+    shown: list[dict] = []
+    for row in rows:
+        item = {column: row.get(column, "") for column in COLUMNS}
+        result = item.get("Result")
+        if item.get("Status") != "Closed" or result == "":
+            item["Drawdown"] = ""
+            item["Drawdown %"] = ""
+            shown.append(item)
+            continue
+        try:
+            equity += float(result)
+        except (TypeError, ValueError):
+            item["Drawdown"] = ""
+            item["Drawdown %"] = ""
+            shown.append(item)
+            continue
+        peak = max(peak, equity)
+        drop = peak - equity
+        item["Drawdown"] = _number(round(drop, 2))
+        item["Drawdown %"] = _number(round((drop / peak) * 100.0, 2)) if peak > 0 else 0
+        shown.append(item)
+    return shown
+
+
 def _number(value: object) -> float | int | str:
     if value is None or value == "":
         return ""
@@ -192,6 +270,7 @@ def _workbook(rows: list[dict]) -> bytes:
         "Why sold": 24,
         "Order id": 18,
         "Expiry": 14,
+        "Drawdown %": 14,
     }
     for index, name in enumerate(COLUMNS, start=1):
         sheet.column_dimensions[get_column_letter(index)].width = widths.get(name, 14)
