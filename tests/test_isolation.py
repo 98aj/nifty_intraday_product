@@ -50,7 +50,7 @@ def test_mock_mode_refuses_live_order_post() -> None:
 
 
 def test_strategy_engine_has_no_broker_or_llm_io() -> None:
-    for rel in ("modules/strategy/orb.py",):
+    for rel in ("modules/strategy/orb.py", "modules/strategy/banknifty_late.py", "modules/options/simulator.py"):
         imports = _imported_modules(ROOT / rel)
         assert not any(name.startswith("modules.upstox") or "genai" in name for name in imports)
 

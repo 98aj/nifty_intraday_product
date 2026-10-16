@@ -20,6 +20,7 @@ LOGGER = logging.getLogger(__name__)
 
 Side = Literal["BUY", "SELL"]
 PORTFOLIO_PATH = PROJECT_ROOT / "data" / "simulated_portfolio.json"
+BANKNIFTY_PORTFOLIO_PATH = PROJECT_ROOT / "data" / "banknifty_portfolio.json"
 PORTFOLIO_FIELDS = (
     "Timestamp",
     "Ticker",

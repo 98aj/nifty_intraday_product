@@ -12,6 +12,7 @@ __pycache__/
 .streamlit/secrets.toml
 data/*.json
 data/*.xlsx
+data/cache/
 !data/.gitkeep
 .idea/
 .vscode/

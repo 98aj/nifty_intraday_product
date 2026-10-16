@@ -1,4 +1,4 @@
-"""Nifty weekly options: contract selection and lot sizing. No broker I/O."""
+"""Option contract selection and lot sizing. No broker I/O."""
 
 from modules.options.selector import (
     OptionQuote,
@@ -6,7 +6,9 @@ from modules.options.selector import (
     build_order,
     choose_atm,
     entry_allowed,
+    listed_lot_size,
     manage_exit,
+    nearest_listed_expiry,
     nearest_weekly_expiry,
     size_lots,
 )
@@ -17,7 +19,9 @@ __all__ = [
     "build_order",
     "choose_atm",
     "entry_allowed",
+    "listed_lot_size",
     "manage_exit",
+    "nearest_listed_expiry",
     "nearest_weekly_expiry",
     "size_lots",
 ]

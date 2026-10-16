@@ -5,6 +5,8 @@ from __future__ import annotations
 from modules.upstox.client import UpstoxClient
 
 NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
+BANKNIFTY_INDEX_KEY = "NSE_INDEX|Nifty Bank"
+INDIA_VIX_KEY = "NSE_INDEX|India VIX"
 
 
 def fetch_nifty_contracts(client: UpstoxClient, underlying: str = NIFTY_INDEX_KEY) -> list[dict]:

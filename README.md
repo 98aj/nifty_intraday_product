@@ -21,10 +21,10 @@ python -m streamlit run app.py
 
 Set **starting capital** and **risk %**. A lot is taken only when the premium and the planned stop both fit that budget and the ₹3,000 daily-loss cap.
 
-The **Backtest** tab replays the same rule on real premiums for the current weekly expiry (about three weeks on this token). Expired older weeks are not readable.
+**Backtest** is a separate page. It replays the same rule on Nifty's own history. Option premiums are estimated from that path using India VIX, because older option prices are not available. Each buy and sell pays a ₹1.50 spread. The last weeks are also scored against real option prices for the current weekly contract. Set starting capital, lots, stop loss, and take profit. The page draws the profit-and-loss chart.
 
 ## Tests
 
 ```powershell
-pytest tests/test_options.py tests/test_option_backtest.py tests/test_option_quality.py tests/test_dashboard_smoke.py tests/test_isolation.py tests/test_trade_journal.py
+pytest tests/test_options.py tests/test_option_backtest.py tests/test_option_simulator.py tests/test_option_quality.py tests/test_dashboard_smoke.py tests/test_isolation.py tests/test_trade_journal.py
 ```

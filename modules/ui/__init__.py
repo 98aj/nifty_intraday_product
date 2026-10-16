@@ -1,4 +1,4 @@
-"""Module 3 — Streamlit desk widgets. The master page is `app.py`."""
+"""Streamlit pages. The live desk and the backtest are registered in `app.py`."""
 
 from modules.ui.styles import inject_css
 

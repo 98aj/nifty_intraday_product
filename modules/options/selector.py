@@ -37,6 +37,38 @@ class SizedOrder:
     cash_required: float
 
 
+def nearest_listed_expiry(rows: list[dict], today: date) -> str | None:
+    """Soonest expiry on or after `today`. A weekly flag does not jump the queue."""
+
+    future: list[date] = []
+    for row in rows:
+        raw = str(row.get("expiry") or "")
+        try:
+            stamp = date.fromisoformat(raw[:10])
+        except ValueError:
+            continue
+        if stamp >= today:
+            future.append(stamp)
+    if not future:
+        return None
+    return min(future).isoformat()
+
+
+def listed_lot_size(rows: list[dict], expiry: str) -> int | None:
+    """Exchange lot for that expiry, or None when the contract does not say."""
+
+    for row in rows:
+        if str(row.get("expiry") or "")[:10] != expiry:
+            continue
+        try:
+            size = int(float(row.get("lot_size") or 0))
+        except (TypeError, ValueError):
+            continue
+        if size > 0:
+            return size
+    return None
+
+
 def nearest_weekly_expiry(rows: list[dict], today: date) -> str | None:
     """Soonest expiry on or after `today`. Weekly expiries win when any exist."""
 
