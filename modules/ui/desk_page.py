@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -10,6 +11,7 @@ import streamlit as st
 
 from config.settings import IST, Settings, load_settings
 from modules.copilot.option_quality import load_option_quality, quality_allows, quality_summary
+from modules.desk_loop import desk_lock, loop_caption, loop_is_fresh, save_desk_controls
 from modules.journal.trade_journal import TradeJournal, max_drawdown
 from modules.options.selector import (
     FLATTEN_AT,
@@ -78,9 +80,10 @@ def render_desk() -> None:
     order = preview if contract is not None else None
     _show_lot_cost(sample, preview, lot_note, lots)
 
-    _mark_and_exit(broker, settings, destination, now)
-    if not paused and allowed_by_gemini:
-        _maybe_enter(broker, settings, destination, now, signal, order)
+    if not loop_is_fresh(now):
+        _mark_and_exit(broker, settings, destination, now)
+        if not paused and allowed_by_gemini:
+            _maybe_enter(broker, settings, destination, now, signal, order)
 
     _paint_market(
         hero_box,
@@ -102,10 +105,29 @@ def render_desk() -> None:
     _show_quality(quality_box, quality)
     _show_ticket(order, paused, broker, now, allowed_by_gemini)
     _live_gate(settings, destination)
+    save_desk_controls(
+        "nifty",
+        {
+            "capital": float(capital),
+            "lots": int(lots),
+            "stop_frac": float(stop_frac),
+            "target_frac": float(target_frac),
+            "destination": destination,
+            "paused": bool(paused),
+            "live_armed": bool(st.session_state.get("live_armed")),
+        },
+    )
     _render_book(broker, capital)
 
     @st.fragment(run_every=REFRESH_SECONDS)
     def _beat() -> None:
+        if loop_is_fresh():
+            last = float(st.session_state.get("_desk_beat") or 0)
+            current = time.time()
+            st.session_state["_desk_beat"] = current
+            if last and current - last >= REFRESH_SECONDS - 0.4:
+                st.rerun()
+            return
         if st.session_state.get("machine_paused"):
             return
         beat_now = datetime.now(IST)
@@ -121,6 +143,7 @@ def render_desk() -> None:
 
     _beat()
     st.caption(f"{DESTINATION_LABELS[destination]} · {now.strftime('%H:%M')} IST · sells by {FLATTEN_AT.strftime('%H:%M')}")
+    st.caption(loop_caption(now))
 
 
 def _bootstrap() -> None:
@@ -407,6 +430,11 @@ def _live_setup(settings: Settings, now: datetime, capital: float, lots: int, st
 
 
 def _maybe_enter(broker, settings: Settings, destination: str, now: datetime, signal: str, order) -> None:
+    with desk_lock():
+        _enter_locked(broker, settings, destination, now, signal, order)
+
+
+def _enter_locked(broker, settings: Settings, destination: str, now: datetime, signal: str, order) -> None:
     if order is None or _traded_today(broker, now):
         return
     allowed, why = entry_allowed(now, signal)
@@ -455,6 +483,11 @@ def _maybe_enter(broker, settings: Settings, destination: str, now: datetime, si
 
 
 def _mark_and_exit(broker, settings: Settings, destination: str, now: datetime) -> None:
+    with desk_lock():
+        _exit_locked(broker, settings, now)
+
+
+def _exit_locked(broker, settings: Settings, now: datetime) -> None:
     opens = broker.open_positions()
     if not opens:
         return
