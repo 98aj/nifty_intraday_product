@@ -179,6 +179,53 @@ def choose_atm(quotes: list[OptionQuote], spot: float, index_side: str) -> Optio
     return min(pool, key=lambda row: (abs(row.strike - spot), row.strike))
 
 
+def affordable_order(
+    quotes: list[OptionQuote],
+    spot: float,
+    index_side: str,
+    lots: int,
+    capital: float,
+    stop_frac: float,
+    target_frac: float,
+    daily_loss_cap: float = 3000.0,
+    max_otm_steps: int = 3,
+) -> tuple[SizedOrder | None, str]:
+    """Size the ATM option; when it is too expensive, step out of the money.
+
+    A bullish break wants the ATM call, a bearish break the ATM put. If that
+    contract does not fit the requested lots in the capital, or busts the loss
+    cap at the premium stop, walk one strike further out of the money at a time
+    (calls move up in strike, puts move down) and try again, up to
+    ``max_otm_steps`` strikes out. Returns the first order that fits, or
+    ``(None, why)`` when nothing inside that range fits.
+    """
+
+    wanted = "CE" if index_side == "BUY" else "PE" if index_side == "SELL" else ""
+    pool = [row for row in quotes if row.option_type == wanted and row.ltp > 0]
+    if not pool or spot <= 0:
+        return None, "No at-the-money option."
+    atm = min(pool, key=lambda row: (abs(row.strike - spot), row.strike))
+    # One listed contract per strike; keep the out-of-the-money side, ATM first.
+    by_strike = {row.strike: row for row in pool}
+    if wanted == "CE":
+        strikes = sorted(s for s in by_strike if s >= atm.strike)
+    else:
+        strikes = sorted((s for s in by_strike if s <= atm.strike), reverse=True)
+    candidates = [by_strike[s] for s in strikes[: max_otm_steps + 1]]
+
+    last_note = ""
+    for steps, contract in enumerate(candidates):
+        order, note = order_for_lots(
+            contract, lots, capital, stop_frac, target_frac, daily_loss_cap
+        )
+        if order is not None:
+            return order, (f"{steps} strike(s) OTM." if steps else "")
+        last_note = note
+    return None, (
+        f"No option fit within {max_otm_steps} strike(s) OTM. {last_note}".strip()
+    )
+
+
 def size_lots(
     capital: float,
     risk_pct: float,

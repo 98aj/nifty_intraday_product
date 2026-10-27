@@ -23,14 +23,13 @@ from modules.copilot.option_quality import load_option_quality, quality_allows
 from modules.journal.trade_journal import TradeJournal
 from modules.options.selector import (
     OptionQuote,
-    choose_atm,
+    affordable_order,
     entry_allowed,
     listed_lot_size,
     lot_size_for,
     manage_exit,
     nearest_listed_expiry,
     nearest_weekly_expiry,
-    order_for_lots,
     parse_chain_rows,
 )
 from modules.risk.risk_manager import BANKNIFTY_PORTFOLIO_PATH, PaperTradingBroker
@@ -143,7 +142,7 @@ def run_nifty_cycle(
     controls: dict[str, Any],
     spot: float,
     candles: pd.DataFrame,
-    contract: OptionQuote | None,
+    quotes: list[OptionQuote] | None = None,
     journal: TradeJournal | None = None,
     gemini_ok: bool = True,
     gemini_why: str = "",
@@ -167,10 +166,12 @@ def run_nifty_cycle(
         return exit_note or why
     if not gemini_ok:
         return gemini_why or "Gemini skipped this break."
-    if contract is None or signal not in {"BUY", "SELL"}:
+    if not quotes or signal not in {"BUY", "SELL"}:
         return "No at-the-money Nifty option."
-    order, note = order_for_lots(
-        contract,
+    order, note = affordable_order(
+        quotes,
+        spot,
+        signal,
         int(controls["lots"]),
         float(controls["capital"]),
         float(controls["stop_frac"]),
@@ -192,7 +193,7 @@ def run_bank_cycle(
     controls: dict[str, Any],
     spot: float,
     candles: pd.DataFrame,
-    contract: OptionQuote | None,
+    quotes: list[OptionQuote] | None = None,
     journal: TradeJournal | None = None,
     prices: dict[str, float] | None = None,
     place_order: Any = None,
@@ -212,10 +213,12 @@ def run_bank_cycle(
     allowed, why = late_entry_allowed(now, signal)
     if not allowed:
         return exit_note or why
-    if contract is None or signal not in {"BUY", "SELL"}:
+    if not quotes or signal not in {"BUY", "SELL"}:
         return "No at-the-money Bank Nifty option."
-    order, note = order_for_lots(
-        contract,
+    order, note = affordable_order(
+        quotes,
+        spot,
+        signal,
         int(controls["lots"]),
         float(controls["capital"]),
         float(controls["stop_frac"]),
@@ -295,7 +298,7 @@ def main() -> None:
 def _nifty_live(settings: Settings, now: datetime) -> str:
     controls = load_nifty_controls()
     broker = PaperTradingBroker()
-    spot, candles, contract = _nifty_market(settings, now)
+    spot, candles, quotes = _nifty_market(settings, now)
     opening = calculate_opening_range(candles, now=now)
     signal = "SCANNING"
     if opening.ready and spot > 0:
@@ -316,7 +319,7 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
             controls=controls,
             spot=spot,
             candles=candles,
-            contract=contract if signal in {"BUY", "SELL"} else None,
+            quotes=quotes if signal in {"BUY", "SELL"} else None,
             gemini_ok=gemini_ok,
             gemini_why=gemini_why,
         )
@@ -325,7 +328,7 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
 def _bank_live(settings: Settings, now: datetime) -> str:
     controls = load_bank_controls()
     broker = PaperTradingBroker(BANKNIFTY_PORTFOLIO_PATH)
-    spot, candles, contract, signal = _bank_market(settings, now)
+    spot, candles, quotes, signal = _bank_market(settings, now)
     with desk_lock():
         return run_bank_cycle(
             now=now,
@@ -334,11 +337,11 @@ def _bank_live(settings: Settings, now: datetime) -> str:
             controls=controls,
             spot=spot,
             candles=candles,
-            contract=contract if signal in {"BUY", "SELL"} else None,
+            quotes=quotes if signal in {"BUY", "SELL"} else None,
         )
 
 
-def _nifty_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, OptionQuote | None]:
+def _nifty_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, list[OptionQuote]]:
     from modules.upstox.client import UpstoxClient
 
     client = UpstoxClient(settings.upstox_access_token)
@@ -349,17 +352,17 @@ def _nifty_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFram
     if opening.ready and spot > 0:
         signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
     if spot <= 0 or signal not in {"BUY", "SELL"}:
-        return spot, candles, None
+        return spot, candles, []
     rows = fetch_nifty_contracts(client)
     expiry = nearest_weekly_expiry(rows, now.date())
     if not expiry:
-        return spot, candles, None
+        return spot, candles, []
     chain = _chain(client, NIFTY_INDEX_KEY, expiry)
     quotes = parse_chain_rows(chain, expiry, lot_size_for(rows, expiry))
-    return spot, candles, choose_atm(quotes, spot, signal)
+    return spot, candles, quotes
 
 
-def _bank_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, OptionQuote | None, str]:
+def _bank_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, list[OptionQuote], str]:
     from modules.upstox.client import UpstoxClient
 
     client = UpstoxClient(settings.upstox_access_token)
@@ -370,15 +373,15 @@ def _bank_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame
     if session.ready and spot > 0:
         signal = evaluate_late_break(candles, session.high_boundary, session.low_boundary, now)
     if spot <= 0 or signal not in {"BUY", "SELL"}:
-        return spot, candles, None, signal
+        return spot, candles, [], signal
     rows = fetch_nifty_contracts(client, BANKNIFTY_INDEX_KEY)
     expiry = nearest_listed_expiry(rows, now.date())
     lot_size = listed_lot_size(rows, expiry or "")
     if not expiry or lot_size is None:
-        return spot, candles, None, signal
+        return spot, candles, [], signal
     chain = _chain(client, BANKNIFTY_INDEX_KEY, expiry)
     quotes = [row for row in parse_chain_rows(chain, expiry, lot_size) if row.lot_size > 0]
-    return spot, candles, choose_atm(quotes, spot, signal), signal
+    return spot, candles, quotes, signal
 
 
 def _candles(client: Any, key: str, now: datetime, days: int) -> pd.DataFrame:

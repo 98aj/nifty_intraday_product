@@ -3,6 +3,7 @@
 from modules.options.selector import (
     OptionQuote,
     SizedOrder,
+    affordable_order,
     build_order,
     choose_atm,
     entry_allowed,
@@ -16,6 +17,7 @@ from modules.options.selector import (
 __all__ = [
     "OptionQuote",
     "SizedOrder",
+    "affordable_order",
     "build_order",
     "choose_atm",
     "entry_allowed",

@@ -5,6 +5,7 @@ from datetime import datetime
 from config.settings import IST
 from modules.options.selector import (
     OptionQuote,
+    affordable_order,
     build_order,
     choose_atm,
     entry_allowed,
@@ -68,6 +69,56 @@ def test_order_for_lots_refuses_when_the_stop_exceeds_the_cap() -> None:
     order, note = order_for_lots(contract, 2, 500_000, 0.4, 0.5)
     assert order is None
     assert "3,000" in note
+
+
+def test_affordable_order_takes_the_atm_when_it_fits() -> None:
+    quotes = [
+        OptionQuote("CE1", "NIFTY 22500 CE", "2026-10-13", 22500, "CE", 65, 100),
+        OptionQuote("CE2", "NIFTY 22600 CE", "2026-10-13", 22600, "CE", 65, 60),
+    ]
+    order, note = affordable_order(quotes, 22520, "BUY", 1, 500_000, 0.4, 0.5)
+    assert order is not None
+    assert order.contract.strike == 22500
+    assert note == ""
+
+
+def test_affordable_order_steps_otm_when_the_atm_is_too_dear() -> None:
+    # ATM 150 busts the loss cap at one lot (150*65*0.4 = 3900 > 3000);
+    # one strike out at 110 fits (110*65*0.4 = 2860).
+    quotes = [
+        OptionQuote("CE1", "NIFTY 22500 CE", "2026-10-13", 22500, "CE", 65, 150),
+        OptionQuote("CE2", "NIFTY 22600 CE", "2026-10-13", 22600, "CE", 65, 110),
+    ]
+    order, note = affordable_order(quotes, 22520, "BUY", 1, 500_000, 0.4, 0.5)
+    assert order is not None
+    assert order.contract.strike == 22600
+    assert "1 strike(s) OTM" in note
+
+
+def test_affordable_order_walks_down_for_puts() -> None:
+    quotes = [
+        OptionQuote("PE1", "NIFTY 22500 PE", "2026-10-13", 22500, "PE", 65, 150),
+        OptionQuote("PE2", "NIFTY 22400 PE", "2026-10-13", 22400, "PE", 65, 110),
+    ]
+    order, note = affordable_order(quotes, 22520, "SELL", 1, 500_000, 0.4, 0.5)
+    assert order is not None
+    assert order.contract.option_type == "PE"
+    assert order.contract.strike == 22400
+
+
+def test_affordable_order_stays_flat_beyond_three_strikes_otm() -> None:
+    # Every strike inside the 3-step window busts the cap; a cheap strike sits
+    # further out but must not be reached.
+    quotes = [
+        OptionQuote("CE0", "NIFTY 22500 CE", "2026-10-13", 22500, "CE", 65, 200),
+        OptionQuote("CE1", "NIFTY 22600 CE", "2026-10-13", 22600, "CE", 65, 190),
+        OptionQuote("CE2", "NIFTY 22700 CE", "2026-10-13", 22700, "CE", 65, 180),
+        OptionQuote("CE3", "NIFTY 22800 CE", "2026-10-13", 22800, "CE", 65, 170),
+        OptionQuote("CE4", "NIFTY 22900 CE", "2026-10-13", 22900, "CE", 65, 40),
+    ]
+    order, note = affordable_order(quotes, 22520, "BUY", 1, 500_000, 0.4, 0.5)
+    assert order is None
+    assert "3 strike(s) OTM" in note
 
 
 def test_build_order_sets_stop_and_target() -> None:

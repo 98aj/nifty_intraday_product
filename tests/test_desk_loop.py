@@ -64,7 +64,7 @@ def test_nifty_rule_still_buys_the_midday_breakdown(tmp_path) -> None:
         controls=_controls(),
         spot=22954.0,
         candles=_candles(),
-        contract=OptionQuote("K", "NIFTY 22950 PE 2026-10-19", "2026-10-19", 22950, "PE", 65, 60.3),
+        quotes=[OptionQuote("K", "NIFTY 22950 PE 2026-10-19", "2026-10-19", 22950, "PE", 65, 60.3)],
         journal=TradeJournal(tmp_path / "journal"),
         gemini_ok=True,
     )
@@ -81,7 +81,7 @@ def test_nifty_rule_still_refuses_after_1430(tmp_path) -> None:
         controls=_controls(),
         spot=22889.0,
         candles=_candles(),
-        contract=OptionQuote("K", "NIFTY 22900 PE 2026-10-19", "2026-10-19", 22900, "PE", 65, 11.0),
+        quotes=[OptionQuote("K", "NIFTY 22900 PE 2026-10-19", "2026-10-19", 22900, "PE", 65, 11.0)],
         journal=TradeJournal(tmp_path / "journal"),
         gemini_ok=True,
     )
