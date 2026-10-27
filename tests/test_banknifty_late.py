@@ -146,7 +146,10 @@ def test_listed_expiry_ignores_weekly_and_refuses_a_missing_lot() -> None:
         {"expiry": "2026-11-03", "weekly": True, "lot_size": 65},
     ]
     today = date(2026, 10, 16)
-    assert nearest_weekly_expiry(rows, today) == "2026-11-03"
+    # Both pickers now take the genuinely nearest expiry. Preferring the
+    # exchange "weekly" flag used to skip the nearer 2026-10-27 contract and
+    # price a costlier, farther-dated option (the cause of the no-trade block).
+    assert nearest_weekly_expiry(rows, today) == "2026-10-27"
     assert nearest_listed_expiry(rows, today) == "2026-10-27"
     assert listed_lot_size(rows, "2026-10-27") == 30
     assert listed_lot_size(rows, "2026-12-29") is None

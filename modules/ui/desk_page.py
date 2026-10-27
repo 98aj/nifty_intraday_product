@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -41,9 +40,47 @@ DESTINATION_LABELS = {PAPER: "Paper trade", LIVE: "Live trade"}
 def render_desk() -> None:
     settings = load_settings()
     _bootstrap()
+    destination, paused = _top_bar()
+    capital, lots, stop_frac, target_frac, max_loss = _money_row()
+    _live_gate(settings, destination)
+    save_desk_controls(
+        "nifty",
+        {
+            "capital": float(capital),
+            "lots": int(lots),
+            "stop_frac": float(stop_frac),
+            "target_frac": float(target_frac),
+            "max_loss": float(max_loss),
+            "destination": destination,
+            "paused": bool(paused),
+            "live_armed": bool(st.session_state.get("live_armed")),
+        },
+    )
+
+    # The live view redraws itself in place every few seconds. Only this slot
+    # updates on the timer, so the inputs above never flicker or reset.
+    live_slot = st.empty()
+
+    @st.fragment(run_every=REFRESH_SECONDS)
+    def _live() -> None:
+        with live_slot.container():
+            _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac, max_loss)
+
+    _live()
+
+
+def _render_live(
+    settings: Settings,
+    destination: str,
+    paused: bool,
+    capital: float,
+    lots: int,
+    stop_frac: float,
+    target_frac: float,
+    max_loss: float,
+) -> None:
     now = datetime.now(IST)
     broker = PaperTradingBroker()
-    destination, paused = _top_bar()
     hero_box = st.empty()
     level_box = st.empty()
     quality_box = st.empty()
@@ -73,12 +110,10 @@ def render_desk() -> None:
     )
     allowed_by_gemini, gemini_why = quality_allows(signal, quality)
 
-    capital, lots, stop_frac, target_frac = _money_row()
     preview, lot_note = (None, "")
     if sample is not None:
-        preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac)
+        preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac, max_loss)
     order = preview if contract is not None else None
-    _show_lot_cost(sample, preview, lot_note, lots)
 
     if not loop_is_fresh(now):
         _mark_and_exit(broker, settings, destination, now)
@@ -103,46 +138,12 @@ def render_desk() -> None:
         gemini_why,
     )
     _show_quality(quality_box, quality)
+    _show_lot_cost(sample, preview, lot_note, lots, max_loss, now)
     _show_ticket(order, paused, broker, now, allowed_by_gemini)
-    _live_gate(settings, destination)
-    save_desk_controls(
-        "nifty",
-        {
-            "capital": float(capital),
-            "lots": int(lots),
-            "stop_frac": float(stop_frac),
-            "target_frac": float(target_frac),
-            "destination": destination,
-            "paused": bool(paused),
-            "live_armed": bool(st.session_state.get("live_armed")),
-        },
-    )
     _render_book(broker, capital)
-
-    @st.fragment(run_every=REFRESH_SECONDS)
-    def _beat() -> None:
-        if loop_is_fresh():
-            last = float(st.session_state.get("_desk_beat") or 0)
-            current = time.time()
-            st.session_state["_desk_beat"] = current
-            if last and current - last >= REFRESH_SECONDS - 0.4:
-                st.rerun()
-            return
-        if st.session_state.get("machine_paused"):
-            return
-        beat_now = datetime.now(IST)
-        before = str(st.session_state.get("flash") or "")
-        _mark_and_exit(broker, settings, destination, beat_now)
-        beat_signal, beat_order, beat_ok = _live_setup(
-            settings, beat_now, capital, lots, stop_frac, target_frac
-        )
-        if beat_ok:
-            _maybe_enter(broker, settings, destination, beat_now, beat_signal, beat_order)
-        if str(st.session_state.get("flash") or "") != before:
-            st.rerun()
-
-    _beat()
-    st.caption(f"{DESTINATION_LABELS[destination]} · {now.strftime('%H:%M')} IST · sells by {FLATTEN_AT.strftime('%H:%M')}")
+    st.caption(
+        f"{DESTINATION_LABELS[destination]} · {now.strftime('%H:%M')} IST · sells by {FLATTEN_AT.strftime('%H:%M')}"
+    )
     st.caption(loop_caption(now))
 
 
@@ -152,6 +153,7 @@ def _bootstrap() -> None:
     st.session_state.setdefault("trade_lots", 1)
     st.session_state.setdefault("premium_stop_pct", 40)
     st.session_state.setdefault("premium_target_pct", 60)
+    st.session_state.setdefault("premium_max_loss", 3000.0)
     st.session_state.setdefault("machine_paused", False)
     st.session_state.setdefault("live_armed", False)
     st.session_state.setdefault("flash", "")
@@ -185,8 +187,8 @@ def _top_bar() -> tuple[str, bool]:
     return destination, paused
 
 
-def _money_row() -> tuple[float, int, float, float]:
-    capital_col, lots_col, stop_col, target_col = st.columns(4)
+def _money_row() -> tuple[float, int, float, float, float]:
+    capital_col, lots_col, stop_col, target_col, loss_col = st.columns(5)
     capital = capital_col.number_input(
         "Starting capital (₹)",
         min_value=1_000.0,
@@ -210,13 +212,31 @@ def _money_row() -> tuple[float, int, float, float]:
         step=5,
         key="premium_target_pct",
     )
-    return float(capital), int(lots), float(stop_pct) / 100.0, float(target_pct) / 100.0
+    max_loss = loss_col.number_input(
+        "Max loss (₹)",
+        min_value=1_000.0,
+        max_value=50_000.0,
+        step=500.0,
+        format="%.0f",
+        key="premium_max_loss",
+    )
+    return (
+        float(capital),
+        int(lots),
+        float(stop_pct) / 100.0,
+        float(target_pct) / 100.0,
+        float(max_loss),
+    )
 
 
-def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int) -> None:
+def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, max_loss: float, now: datetime) -> None:
     if sample is None:
-        st.caption("Pick how many lots to buy. Nifty’s exchange lot is 65. A trade is skipped if the cash exceeds your capital, or the stop can lose more than ₹3,000.")
+        st.caption(
+            "Pick how many lots to buy. Nifty’s exchange lot is 65. A trade is skipped if the "
+            f"cash exceeds your capital, or the stop can lose more than ₹{max_loss:,.0f}."
+        )
         return
+    st.caption(_contract_line(sample, now))
     kind = "call" if sample.option_type == "CE" else "put"
     if preview is None:
         st.warning(note)
@@ -226,6 +246,32 @@ def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int) ->
         f"A {kind} at ₹{preview.premium:,.2f} needs ₹{preview.cash_required:,.0f}. "
         f"If the stop hits, the loss is about ₹{preview.risk_inr:,.0f}."
     )
+
+
+def _contract_line(sample: OptionQuote, now: datetime) -> str:
+    """One line naming the exact contract being priced, so the expiry is visible."""
+
+    side = "call" if sample.option_type == "CE" else "put"
+    dte = _days_to_expiry(sample.expiry, now)
+    if dte is None:
+        dte_txt = "expiry unknown"
+    elif dte == 0:
+        dte_txt = "expires today"
+    else:
+        dte_txt = f"{dte} day{'s' if dte != 1 else ''} to expiry"
+    return (
+        f"Pricing the ATM **{sample.strike:,.0f} {side}** · expiry **{sample.expiry}** · "
+        f"{dte_txt} · live premium **₹{sample.ltp:,.2f}**"
+    )
+
+
+def _days_to_expiry(expiry: str, now: datetime) -> int | None:
+    try:
+        exp = date.fromisoformat(str(expiry)[:10])
+    except ValueError:
+        return None
+    today = now.astimezone(IST).date() if now.tzinfo else now.date()
+    return (exp - today).days
 
 
 def _live_gate(settings: Settings, destination: str) -> None:
@@ -402,31 +448,6 @@ def _render_book(broker: PaperTradingBroker, capital: float) -> None:
     else:
         st.dataframe(sheet, width="stretch", hide_index=True, height=360)
     st.caption("Each trade is saved in the project at data/trade_journal.xlsx.")
-
-
-def _live_setup(settings: Settings, now: datetime, capital: float, lots: int, stop_frac: float, target_frac: float):
-    """Read Nifty again and return the signal, the sized order, and whether Gemini allows it."""
-
-    signal = "SCANNING"
-    order = None
-    if not settings.upstox_configured:
-        return signal, order, False
-    spot, candles, _index_error = _load_index(settings)
-    opening = calculate_opening_range(candles, now=now)
-    if opening.ready and spot > 0:
-        signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    contract, _sample, _chain_error = _load_contract(settings, spot, signal, now)
-    quality = load_option_quality(
-        now,
-        spot,
-        float(opening.high_boundary or 0),
-        float(opening.low_boundary or 0),
-        bool(opening.ready),
-    )
-    allowed, _why = quality_allows(signal, quality)
-    if contract is not None:
-        order, _note = order_for_lots(contract, lots, capital, stop_frac, target_frac)
-    return signal, order, allowed
 
 
 def _maybe_enter(broker, settings: Settings, destination: str, now: datetime, signal: str, order) -> None:

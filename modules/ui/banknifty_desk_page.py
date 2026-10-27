@@ -7,8 +7,7 @@ Buys one at-the-money call or put after a 5-minute close through the
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -54,9 +53,46 @@ JOURNAL_DIR = PROJECT_ROOT / "data" / "banknifty"
 def render_desk() -> None:
     settings = load_settings()
     _bootstrap()
+    destination, paused = _top_bar()
+    capital, lots, stop_frac, target_frac, max_loss = _money_row()
+    _live_gate(settings, destination)
+    save_desk_controls(
+        "banknifty",
+        {
+            "capital": float(capital),
+            "lots": int(lots),
+            "stop_frac": float(stop_frac),
+            "target_frac": float(target_frac),
+            "max_loss": float(max_loss),
+            "destination": destination,
+            "paused": bool(paused),
+            "live_armed": bool(st.session_state.get("bn_live_armed")),
+        },
+    )
+
+    # Only this slot redraws on the timer, so the inputs above never flicker.
+    live_slot = st.empty()
+
+    @st.fragment(run_every=REFRESH_SECONDS)
+    def _live() -> None:
+        with live_slot.container():
+            _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac, max_loss)
+
+    _live()
+
+
+def _render_live(
+    settings: Settings,
+    destination: str,
+    paused: bool,
+    capital: float,
+    lots: int,
+    stop_frac: float,
+    target_frac: float,
+    max_loss: float,
+) -> None:
     now = datetime.now(IST)
     broker = PaperTradingBroker(BANKNIFTY_PORTFOLIO_PATH)
-    destination, paused = _top_bar()
     hero_box = st.empty()
     level_box = st.empty()
     cpr_box = st.empty()
@@ -79,12 +115,10 @@ def render_desk() -> None:
             signal = evaluate_late_break(candles, session.high_boundary, session.low_boundary, now)
         contract, sample, chain_error = _load_contract(settings, spot, signal, now)
 
-    capital, lots, stop_frac, target_frac, max_loss = _money_row()
     preview, lot_note = (None, "")
     if sample is not None:
         preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac, max_loss)
     order = preview if contract is not None else None
-    _show_lot_cost(sample, preview, lot_note, lots, max_loss)
 
     if not loop_is_fresh(now):
         _mark_and_exit(broker, settings, now)
@@ -108,45 +142,9 @@ def render_desk() -> None:
         chain_error,
     )
     _show_cpr(cpr_box, cpr)
+    _show_lot_cost(sample, preview, lot_note, lots, max_loss, now)
     _show_ticket(order, paused, broker, now)
-    _live_gate(settings, destination)
-    save_desk_controls(
-        "banknifty",
-        {
-            "capital": float(capital),
-            "lots": int(lots),
-            "stop_frac": float(stop_frac),
-            "target_frac": float(target_frac),
-            "max_loss": float(max_loss),
-            "destination": destination,
-            "paused": bool(paused),
-            "live_armed": bool(st.session_state.get("bn_live_armed")),
-        },
-    )
     _render_book(broker, capital)
-
-    @st.fragment(run_every=REFRESH_SECONDS)
-    def _beat() -> None:
-        if loop_is_fresh():
-            last = float(st.session_state.get("_bn_beat") or 0)
-            current = time.time()
-            st.session_state["_bn_beat"] = current
-            if last and current - last >= REFRESH_SECONDS - 0.4:
-                st.rerun()
-            return
-        if st.session_state.get("bn_machine_paused"):
-            return
-        beat_now = datetime.now(IST)
-        before = str(st.session_state.get("bn_flash") or "")
-        _mark_and_exit(broker, settings, beat_now)
-        beat_signal, beat_order = _live_setup(
-            settings, beat_now, capital, lots, stop_frac, target_frac, max_loss
-        )
-        _maybe_enter(broker, settings, destination, beat_now, beat_signal, beat_order)
-        if str(st.session_state.get("bn_flash") or "") != before:
-            st.rerun()
-
-    _beat()
     st.caption(
         f"{DESTINATION_LABELS[destination]} · {now.strftime('%H:%M')} IST · sells by {FLATTEN_AT.strftime('%H:%M')}"
     )
@@ -229,13 +227,14 @@ def _money_row() -> tuple[float, int, float, float, float]:
     return float(capital), int(lots), float(stop_pct) / 100.0, float(target_pct) / 100.0, float(max_loss)
 
 
-def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, max_loss: float) -> None:
+def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, max_loss: float, now: datetime) -> None:
     if sample is None:
         st.caption(
             "The lot size comes from the Bank Nifty contract. "
             f"A trade is skipped if the cash exceeds your capital, or the stop can lose more than ₹{max_loss:,.0f}."
         )
         return
+    st.caption(_contract_line(sample, now))
     kind = "call" if sample.option_type == "CE" else "put"
     if preview is None:
         st.warning(note)
@@ -245,6 +244,32 @@ def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, ma
         f"A {kind} at ₹{preview.premium:,.2f} needs ₹{preview.cash_required:,.0f}. "
         f"If the stop hits, the loss is about ₹{preview.risk_inr:,.0f}."
     )
+
+
+def _contract_line(sample: OptionQuote, now: datetime) -> str:
+    """One line naming the exact contract being priced, so the expiry is visible."""
+
+    side = "call" if sample.option_type == "CE" else "put"
+    dte = _days_to_expiry(sample.expiry, now)
+    if dte is None:
+        dte_txt = "expiry unknown"
+    elif dte == 0:
+        dte_txt = "expires today"
+    else:
+        dte_txt = f"{dte} day{'s' if dte != 1 else ''} to expiry"
+    return (
+        f"Pricing the ATM **{sample.strike:,.0f} {side}** · expiry **{sample.expiry}** · "
+        f"{dte_txt} · live premium **₹{sample.ltp:,.2f}**"
+    )
+
+
+def _days_to_expiry(expiry: str, now: datetime) -> int | None:
+    try:
+        exp = date.fromisoformat(str(expiry)[:10])
+    except ValueError:
+        return None
+    today = now.astimezone(IST).date() if now.tzinfo else now.date()
+    return (exp - today).days
 
 
 def _live_gate(settings: Settings, destination: str) -> None:
@@ -427,29 +452,6 @@ def _render_book(broker: PaperTradingBroker, capital: float) -> None:
     else:
         st.dataframe(sheet, width="stretch", hide_index=True, height=360)
     st.caption("Each trade is saved in the project at data/banknifty/trade_journal.xlsx.")
-
-
-def _live_setup(
-    settings: Settings,
-    now: datetime,
-    capital: float,
-    lots: int,
-    stop_frac: float,
-    target_frac: float,
-    max_loss: float,
-):
-    signal = "SCANNING"
-    order = None
-    if not settings.upstox_configured:
-        return signal, order
-    spot, candles, _index_error = _load_index(settings)
-    session = calculate_session_range(candles, now=now)
-    if session.ready and spot > 0:
-        signal = evaluate_late_break(candles, session.high_boundary, session.low_boundary, now)
-    contract, _sample, _chain_error = _load_contract(settings, spot, signal, now)
-    if contract is not None:
-        order, _note = order_for_lots(contract, lots, capital, stop_frac, target_frac, max_loss)
-    return signal, order
 
 
 def _maybe_enter(broker, settings: Settings, destination: str, now: datetime, signal: str, order) -> None:

@@ -11,7 +11,9 @@ __pycache__/
 .ruff_cache/
 .streamlit/secrets.toml
 data/*.json
+data/banknifty/*.json
 data/*.xlsx
+data/banknifty/*.xlsx
 data/cache/
 !data/.gitkeep
 .idea/

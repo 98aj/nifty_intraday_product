@@ -114,6 +114,7 @@ def load_nifty_controls(path: Path | None = None) -> dict[str, Any]:
         "lots": max(1, _int(raw.get("lots"), 1)),
         "stop_frac": _float(raw.get("stop_frac"), 0.40),
         "target_frac": _float(raw.get("target_frac"), 0.60),
+        "max_loss": _float(raw.get("max_loss"), 3000.0),
         "destination": _mode(raw.get("destination")),
         "paused": bool(raw.get("paused")),
         "live_armed": bool(raw.get("live_armed")),
@@ -174,6 +175,7 @@ def run_nifty_cycle(
         float(controls["capital"]),
         float(controls["stop_frac"]),
         float(controls["target_frac"]),
+        float(controls.get("max_loss") or 3000.0),
     )
     if order is None:
         return note or "One lot does not fit the loss limit."

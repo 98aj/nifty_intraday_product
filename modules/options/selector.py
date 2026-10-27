@@ -70,9 +70,16 @@ def listed_lot_size(rows: list[dict], expiry: str) -> int | None:
 
 
 def nearest_weekly_expiry(rows: list[dict], today: date) -> str | None:
-    """Soonest expiry on or after `today`. Weekly expiries win when any exist."""
+    """Soonest expiry on or after `today` — the current contract.
 
-    future = []
+    The exchange ``weekly`` flag is deliberately ignored here. An earlier
+    version preferred weekly-flagged contracts, which could skip the genuinely
+    nearest expiry and price a much costlier, farther-dated option. The desk
+    always trades the soonest listed expiry (same rule as
+    ``nearest_listed_expiry``).
+    """
+
+    future: list[date] = []
     for row in rows:
         raw = str(row.get("expiry") or "")
         try:
@@ -80,12 +87,10 @@ def nearest_weekly_expiry(rows: list[dict], today: date) -> str | None:
         except ValueError:
             continue
         if stamp >= today:
-            future.append((stamp, bool(row.get("weekly"))))
+            future.append(stamp)
     if not future:
         return None
-    weekly = [item for item in future if item[1]]
-    pool = weekly or future
-    return min(pool)[0].isoformat()
+    return min(future).isoformat()
 
 
 def lot_size_for(rows: list[dict], expiry: str) -> int:
