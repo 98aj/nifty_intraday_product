@@ -443,12 +443,18 @@ def _render_book(broker: PaperTradingBroker, capital: float) -> None:
     if not sheet.empty and "Result" in sheet.columns:
         closed_pl = pd.to_numeric(sheet["Result"], errors="coerce").fillna(0).sum()
     drop, drop_pct = max_drawdown(sheet)
+    live_drop, live_pct = max_drawdown(sheet, "Live")
+    paper_drop, paper_pct = max_drawdown(sheet, "Paper")
     st.caption(f"{len(sheet)} trades in the Nifty 2 journal · paper and live both go in this sheet")
     result_col, drop_col, pct_col = st.columns(3)
     result_col.metric("Finished result", f"₹{closed_pl:,.0f}")
     drop_col.metric("Drawdown", f"₹{drop:,.0f}")
     pct_col.metric("Drawdown %", f"{drop_pct:.2f}%")
-    st.caption("Drawdown is the largest drop from the highest account value, using the starting capital above.")
+    st.caption(
+        "Drawdown is the largest drop from the highest account value, using the starting capital above. "
+        f"Live and paper are tracked separately — Live ₹{live_drop:,.0f} ({live_pct:.2f}%) · "
+        f"Paper ₹{paper_drop:,.0f} ({paper_pct:.2f}%)."
+    )
     if sheet.empty:
         st.info("No trades yet. Each paper or live trade is written into data/nifty2/trade_journal.xlsx.")
     else:

@@ -191,18 +191,26 @@ def _stamp(value: object) -> datetime | None:
     return stamp.astimezone(IST)
 
 
-def max_drawdown(sheet: pd.DataFrame) -> tuple[float, float]:
-    """Largest drop from the high, as rupees and the percentage at that same point."""
+def max_drawdown(sheet: pd.DataFrame, mode: str | None = None) -> tuple[float, float]:
+    """Largest drop from the high, as rupees and the percentage at that same point.
+
+    Pass ``mode`` ("Live" or "Paper") to read one book only. Paper and live trades
+    never share an equity curve, so without a mode the worse of the two is returned.
+    """
 
     if sheet.empty or "Drawdown" not in sheet.columns:
         return 0.0, 0.0
+    if mode is not None and "Mode" in sheet.columns:
+        sheet = sheet[sheet["Mode"] == mode]
+        if sheet.empty:
+            return 0.0, 0.0
     values = pd.to_numeric(sheet["Drawdown"], errors="coerce")
     percents = pd.to_numeric(sheet["Drawdown %"], errors="coerce")
     usable = values.notna()
     if not usable.any():
         return 0.0, 0.0
     values = values.where(usable, 0.0)
-    percents = percents.where(usable, 0.0)
+    percents = percents.where(usable, 0.0).fillna(0.0)
     worst = percents.idxmax()
     if float(percents.loc[worst] or 0) == 0:
         worst = values.idxmax()
@@ -210,31 +218,43 @@ def max_drawdown(sheet: pd.DataFrame) -> tuple[float, float]:
 
 
 def _with_drawdown(rows: list[dict], capital: float) -> list[dict]:
-    """Rupee and percent drop from the highest account value after each closed trade."""
+    """Rupee and percent drop from the highest account value after each closed trade.
 
-    equity = float(capital) if capital > 0 else 0.0
-    peak = equity
-    shown: list[dict] = []
-    for row in rows:
-        item = {column: row.get(column, "") for column in COLUMNS}
-        result = item.get("Result")
-        if item.get("Status") != "Closed" or result == "":
-            item["Drawdown"] = ""
-            item["Drawdown %"] = ""
-            shown.append(item)
+    Paper and live rows each get their own equity curve starting from ``capital``.
+    Closed trades are walked in the order they were sold, not the order they were
+    bought, so overlapping positions do not scramble the path. The sheet keeps its
+    original row order. With no capital the rupee drop is still shown but the
+    percent is left blank, since there is no base to divide by.
+    """
+
+    shown = [{column: row.get(column, "") for column in COLUMNS} for row in rows]
+    for item in shown:
+        item["Drawdown"] = ""
+        item["Drawdown %"] = ""
+
+    closed: list[tuple[tuple[str, str, int], dict, float]] = []
+    for index, item in enumerate(shown):
+        if item.get("Status") != "Closed" or item.get("Result") == "":
             continue
         try:
-            equity += float(result)
+            result = float(item.get("Result"))
         except (TypeError, ValueError):
-            item["Drawdown"] = ""
-            item["Drawdown %"] = ""
-            shown.append(item)
             continue
+        sold_at = (str(item.get("Date") or ""), str(item.get("Sold at") or ""), index)
+        closed.append((sold_at, item, result))
+    closed.sort(key=lambda entry: entry[0])
+
+    start = float(capital) if capital > 0 else 0.0
+    curves: dict[str, tuple[float, float]] = {}
+    for _stamp_key, item, result in closed:
+        mode = str(item.get("Mode") or "Paper")
+        equity, peak = curves.get(mode, (start, start))
+        equity += result
         peak = max(peak, equity)
+        curves[mode] = (equity, peak)
         drop = peak - equity
         item["Drawdown"] = _number(round(drop, 2))
-        item["Drawdown %"] = _number(round((drop / peak) * 100.0, 2)) if peak > 0 else 0
-        shown.append(item)
+        item["Drawdown %"] = _number(round((drop / peak) * 100.0, 2)) if peak > 0 else ""
     return shown
 
 

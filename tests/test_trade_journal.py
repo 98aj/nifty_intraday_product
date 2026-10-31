@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 from openpyxl import load_workbook
 
 from config.settings import IST
@@ -119,6 +120,62 @@ def test_drawdown_is_the_drop_from_the_highest_account_value(tmp_path: Path) -> 
     opened = journal.table(10_000)
     assert opened.iloc[2]["Drawdown"] == ""
     assert opened.iloc[2]["Drawdown %"] == ""
+
+
+def _closed(destination: str, day: int, hour: int, strike: int, pl: float) -> dict:
+    buy = _buy(destination)
+    buy["Timestamp"] = datetime(2026, 10, day, 10, 5, tzinfo=IST).isoformat()
+    buy["Ticker"] = f"NIFTY {strike} CE {day:02d} OCT 26"
+    buy["strike"] = strike
+    close = dict(buy)
+    close.update(
+        {
+            "status": "CLOSED",
+            "ExitPrice": 40.0,
+            "ExitTimestamp": datetime(2026, 10, day, hour, 0, tzinfo=IST).isoformat(),
+            "RealizedPL": pl,
+            "exit_reason": "PREMIUM_TARGET" if pl >= 0 else "PREMIUM_STOP",
+        }
+    )
+    return close
+
+
+def test_paper_and_live_drawdowns_are_tracked_on_separate_curves(tmp_path: Path) -> None:
+    journal = TradeJournal(tmp_path)
+    # Live book: +2000 then -1000, so a 1000 drop from an 12000 peak.
+    journal.record(_closed("LIVE", 12, 11, 22500, 2000.0))
+    journal.record(_closed("LIVE", 13, 11, 22600, -1000.0))
+    # Paper book: a single -500 loss, a 500 drop from the 10000 start.
+    journal.record(_closed("PAPER", 14, 11, 22700, -500.0))
+
+    sheet = journal.table(10_000)
+    assert max_drawdown(sheet, "Live") == (1000.0, 8.33)
+    assert max_drawdown(sheet, "Paper") == (500.0, 5.0)
+    # A paper loss must not bleed into the live curve, nor the reverse.
+    assert max_drawdown(sheet) == (1000.0, 8.33)
+
+
+def test_closed_trades_are_walked_in_sell_order_not_buy_order(tmp_path: Path) -> None:
+    journal = TradeJournal(tmp_path)
+    # Bought first but sold last, after a position bought later.
+    journal.record(_closed("PAPER", 12, 15, 22500, -300.0))
+    journal.record(_closed("PAPER", 12, 11, 22600, 1000.0))
+
+    sheet = journal.table(10_000)
+    # Sorted by sell time: +1000 (11:00) lifts the peak, then -300 (15:00) is the drop.
+    by_sell = sheet.sort_values("Sold at")
+    assert list(pd.to_numeric(by_sell["Drawdown"])) == [0, 300]
+    assert max_drawdown(sheet) == (300.0, 2.73)
+
+
+def test_no_capital_leaves_the_percent_blank_but_keeps_the_rupee_drop(tmp_path: Path) -> None:
+    journal = TradeJournal(tmp_path)
+    journal.record(_closed("PAPER", 12, 11, 22500, -400.0))
+
+    sheet = journal.table(0)
+    assert sheet.iloc[0]["Drawdown"] == 400
+    assert sheet.iloc[0]["Drawdown %"] == ""
+    assert max_drawdown(sheet) == (400.0, 0.0)
 
 
 def test_broker_close_is_written_into_the_journal(tmp_path: Path) -> None:
