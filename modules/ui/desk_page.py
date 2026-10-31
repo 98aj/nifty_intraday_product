@@ -31,7 +31,11 @@ from modules.upstox.option_chain import NIFTY_INDEX_KEY, fetch_nifty_contracts, 
 from modules.upstox.orders import place_mis_market_order
 
 LOGGER = logging.getLogger("desk")
-REFRESH_SECONDS = 2
+# The live view redraws on this timer. The instance loop, not this page, is the
+# real executor, so a slower redraw calms the screen without delaying trades. The
+# page only places orders itself when the loop is off, and even then this matches
+# the loop's own 5-second cadence.
+REFRESH_SECONDS = 5
 PAPER = "PAPER"
 LIVE = "LIVE"
 DESTINATION_LABELS = {PAPER: "Paper trade", LIVE: "Live trade"}
