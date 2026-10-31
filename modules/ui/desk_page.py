@@ -10,8 +10,8 @@ import streamlit as st
 
 from config.settings import IST, Settings, load_settings
 from modules.copilot.option_quality import load_option_quality, quality_allows, quality_summary
-from modules.desk_loop import desk_lock, loop_caption, loop_is_fresh, save_desk_controls
-from modules.journal.trade_journal import TradeJournal, max_drawdown
+from modules.desk_loop import desk_lock, loop_caption, loop_is_fresh, market_is_open, save_desk_controls
+from modules.journal.trade_journal import TradeJournal, for_display, max_drawdown
 from modules.options.selector import (
     FLATTEN_AT,
     OptionQuote,
@@ -98,7 +98,7 @@ def _render_live(
     contract: OptionQuote | None = None
     sample: OptionQuote | None = None
     chain_error = ""
-    if settings.upstox_configured:
+    if settings.upstox_configured and market_is_open(now):
         spot, candles, index_error = _load_index(settings)
         opening = calculate_opening_range(candles, now=now)
         if opening.ready and spot > 0:
@@ -456,7 +456,7 @@ def _render_book(broker: PaperTradingBroker, capital: float) -> None:
     if sheet.empty:
         st.info("No trades yet. Each paper or live trade is written into data/trade_journal.xlsx.")
     else:
-        st.dataframe(sheet, width="stretch", hide_index=True, height=360)
+        st.dataframe(for_display(sheet), width="stretch", hide_index=True, height=360)
     st.caption("Each trade is saved in the project at data/trade_journal.xlsx.")
 
 

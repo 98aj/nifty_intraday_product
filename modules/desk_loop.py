@@ -314,12 +314,14 @@ def serve() -> None:
         bank_note = "Watching Bank Nifty."
         try:
             settings = load_settings()
-            if settings.upstox_configured:
+            if not settings.upstox_configured:
+                nifty_note = nifty2_note = bank_note = "Add the Upstox token in the .env file."
+            elif not market_is_open(now):
+                nifty_note = nifty2_note = bank_note = "Market closed. No quotes pulled."
+            else:
                 nifty_note = _nifty_live(settings, now)
                 nifty2_note = _nifty2_live(settings, now)
                 bank_note = _bank_live(settings, now)
-            else:
-                nifty_note = nifty2_note = bank_note = "Add the Upstox token in the .env file."
         except Exception as exc:
             LOGGER.exception("Instance trade loop failed")
             nifty_note = f"Trade loop error: {exc.__class__.__name__}"
@@ -613,10 +615,23 @@ def _remember(line: str) -> None:
     LOGGER.info(line)
 
 
+def market_is_open(now: datetime | None = None) -> bool:
+    """True on a weekday between 9:08 and 15:35 IST, when quotes are worth pulling.
+
+    The window opens a little before 9:15 so the first candle is ready, and stays
+    open past the 15:15 square-off so a late exit can still go out. Outside it there
+    is nothing to trade, so the page and the loop both stop hitting Upstox.
+    """
+
+    current = now or datetime.now(IST)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=IST)
+    clock = current.astimezone(IST).time().replace(tzinfo=None)
+    return current.weekday() < 5 and wall_clock(9, 8) <= clock < wall_clock(15, 35)
+
+
 def _sleep(now: datetime) -> None:
-    clock = now.astimezone(IST).time().replace(tzinfo=None)
-    market = wall_clock(9, 10) <= clock < wall_clock(15, 35) and now.weekday() < 5
-    time.sleep(LOOP_SECONDS if market else 60)
+    time.sleep(LOOP_SECONDS if market_is_open(now) else 60)
 
 
 def _configure_logging() -> None:

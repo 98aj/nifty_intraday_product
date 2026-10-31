@@ -43,6 +43,21 @@ COLUMNS = [
     "Order id",
 ]
 
+# Columns that hold numbers. Open rows leave some of these blank, so the raw sheet
+# mixes "" and floats in one column, which pandas cannot hand to Arrow for display.
+NUMERIC_COLUMNS = [
+    "Strike",
+    "Lots",
+    "Quantity",
+    "Buy price",
+    "Sell price",
+    "Stop",
+    "Target",
+    "Result",
+    "Drawdown",
+    "Drawdown %",
+]
+
 _EXIT_WORDS = {
     "PREMIUM_STOP": "Price fell to the stop",
     "PREMIUM_TARGET": "Price hit the target",
@@ -189,6 +204,21 @@ def _stamp(value: object) -> datetime | None:
     if stamp.tzinfo is None:
         return stamp
     return stamp.astimezone(IST)
+
+
+def for_display(sheet: pd.DataFrame) -> pd.DataFrame:
+    """A copy with the numeric columns coerced to numbers, blanks included.
+
+    Keeps the raw sheet's mixed "" and float columns out of Streamlit, which cannot
+    serialize a mixed column and logs a traceback on every redraw otherwise. A blank
+    becomes a real missing value, which the table shows as an empty cell.
+    """
+
+    frame = sheet.copy()
+    for column in NUMERIC_COLUMNS:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame
 
 
 def max_drawdown(sheet: pd.DataFrame, mode: str | None = None) -> tuple[float, float]:
