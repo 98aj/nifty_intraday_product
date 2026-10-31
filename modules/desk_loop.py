@@ -32,7 +32,7 @@ from modules.options.selector import (
     nearest_weekly_expiry,
     parse_chain_rows,
 )
-from modules.risk.risk_manager import BANKNIFTY_PORTFOLIO_PATH, PaperTradingBroker
+from modules.risk.risk_manager import BANKNIFTY_PORTFOLIO_PATH, NIFTY2_PORTFOLIO_PATH, PaperTradingBroker
 from modules.strategy.banknifty_late import (
     MAX_LOSS_INR,
     PREMIUM_STOP_PCT,
@@ -54,8 +54,17 @@ LOGGER = logging.getLogger("desk.loop")
 STATUS_PATH = PROJECT_ROOT / "data" / "desk_loop_status.json"
 LOCK_PATH = PROJECT_ROOT / "data" / "desk_loop.lock"
 NIFTY_CONTROLS = PROJECT_ROOT / "data" / "nifty_desk.json"
+NIFTY2_CONTROLS = PROJECT_ROOT / "data" / "nifty2_desk.json"
 BANK_CONTROLS = PROJECT_ROOT / "data" / "banknifty_desk.json"
+NIFTY2_JOURNAL = PROJECT_ROOT / "data" / "nifty2"
 BANK_JOURNAL = PROJECT_ROOT / "data" / "banknifty"
+
+# A desk's controls file is chosen by name. New desks register here.
+CONTROLS_PATHS = {
+    "nifty": NIFTY_CONTROLS,
+    "nifty2": NIFTY2_CONTROLS,
+    "banknifty": BANK_CONTROLS,
+}
 HEARTBEAT_SECONDS = 30
 LOOP_SECONDS = 5
 
@@ -90,12 +99,16 @@ def loop_caption(now: datetime | None = None) -> str:
     except (OSError, json.JSONDecodeError):
         raw = {}
     nifty = str(raw.get("nifty") or "watching")
+    nifty2 = str(raw.get("nifty2") or "watching")
     bank = str(raw.get("banknifty") or "watching")
-    return f"Instance loop is on. This browser can be closed. Nifty: {nifty} Bank Nifty: {bank}"
+    return (
+        "Instance loop is on. This browser can be closed. "
+        f"Nifty: {nifty} Nifty 2: {nifty2} Bank Nifty: {bank}"
+    )
 
 
 def save_desk_controls(name: str, payload: dict[str, Any], path: Path | None = None) -> None:
-    file = path or (NIFTY_CONTROLS if name == "nifty" else BANK_CONTROLS)
+    file = path or CONTROLS_PATHS.get(name, BANK_CONTROLS)
     file.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2)
     tmp = file.with_suffix(".json.tmp")
@@ -108,6 +121,22 @@ def save_desk_controls(name: str, payload: dict[str, Any], path: Path | None = N
 
 def load_nifty_controls(path: Path | None = None) -> dict[str, Any]:
     raw = _read_json(path or NIFTY_CONTROLS)
+    return {
+        "capital": _float(raw.get("capital"), 500_000.0),
+        "lots": max(1, _int(raw.get("lots"), 1)),
+        "stop_frac": _float(raw.get("stop_frac"), 0.40),
+        "target_frac": _float(raw.get("target_frac"), 0.60),
+        "max_loss": _float(raw.get("max_loss"), 3000.0),
+        "destination": _mode(raw.get("destination")),
+        "paused": bool(raw.get("paused")),
+        "live_armed": bool(raw.get("live_armed")),
+    }
+
+
+def load_nifty2_controls(path: Path | None = None) -> dict[str, Any]:
+    """Second Nifty desk. Same defaults as the first, read from its own file."""
+
+    raw = _read_json(path or NIFTY2_CONTROLS)
     return {
         "capital": _float(raw.get("capital"), 500_000.0),
         "lots": max(1, _int(raw.get("lots"), 1)),
@@ -148,15 +177,21 @@ def run_nifty_cycle(
     gemini_why: str = "",
     prices: dict[str, float] | None = None,
     place_order: Any = None,
+    buy_tag: str = "NIFTY-OPT",
+    exit_tag: str = "OPT-EXIT",
 ) -> str:
-    """One pass of the existing Nifty opening-range rule. No new entry condition."""
+    """One pass of the existing Nifty opening-range rule. No new entry condition.
+
+    The same rule drives the second Nifty desk; it only passes its own journal,
+    broker and order tags so its book stays separate.
+    """
 
     book = journal or TradeJournal()
     opening = calculate_opening_range(candles, now=now)
     signal = "SCANNING"
     if opening.ready and spot > 0:
         signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    exit_note = _exit_open(broker, settings, now, book, prices, place_order, "OPT-EXIT")
+    exit_note = _exit_open(broker, settings, now, book, prices, place_order, exit_tag)
     if controls.get("paused"):
         return exit_note or "Paused. No new Nifty buy."
     if _traded_today(broker, now):
@@ -182,7 +217,7 @@ def run_nifty_cycle(
         return note or "One lot does not fit the loss limit."
     if controls.get("destination") == "LIVE" and not _live_ready(settings, controls):
         return "Live trade is selected, but real orders are not armed."
-    return _buy(broker, settings, controls, now, order, book, place_order, "NIFTY-OPT")
+    return _buy(broker, settings, controls, now, order, book, place_order, buy_tag)
 
 
 def run_bank_cycle(
@@ -271,23 +306,25 @@ def desk_lock() -> Iterator[None]:
 def serve() -> None:
     _configure_logging()
     LOGGER.info("Instance trade loop started")
-    _write_status(datetime.now(IST), "Starting.", "Starting.")
+    _write_status(datetime.now(IST), "Starting.", "Starting.", "Starting.")
     while True:
         now = datetime.now(IST)
         nifty_note = "Watching Nifty."
+        nifty2_note = "Watching Nifty."
         bank_note = "Watching Bank Nifty."
         try:
             settings = load_settings()
             if settings.upstox_configured:
                 nifty_note = _nifty_live(settings, now)
+                nifty2_note = _nifty2_live(settings, now)
                 bank_note = _bank_live(settings, now)
             else:
-                nifty_note = bank_note = "Add the Upstox token in the .env file."
+                nifty_note = nifty2_note = bank_note = "Add the Upstox token in the .env file."
         except Exception as exc:
             LOGGER.exception("Instance trade loop failed")
             nifty_note = f"Trade loop error: {exc.__class__.__name__}"
-        _write_status(now, nifty_note, bank_note)
-        _remember(f"Nifty: {nifty_note} | Bank Nifty: {bank_note}")
+        _write_status(now, nifty_note, bank_note, nifty2_note)
+        _remember(f"Nifty: {nifty_note} | Nifty 2: {nifty2_note} | Bank Nifty: {bank_note}")
         _sleep(now)
 
 
@@ -322,6 +359,41 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
             quotes=quotes if signal in {"BUY", "SELL"} else None,
             gemini_ok=gemini_ok,
             gemini_why=gemini_why,
+        )
+
+
+def _nifty2_live(settings: Settings, now: datetime) -> str:
+    """Second Nifty desk. Same rule and market data, its own book and tags."""
+
+    controls = load_nifty2_controls()
+    broker = PaperTradingBroker(NIFTY2_PORTFOLIO_PATH)
+    spot, candles, quotes = _nifty_market(settings, now)
+    opening = calculate_opening_range(candles, now=now)
+    signal = "SCANNING"
+    if opening.ready and spot > 0:
+        signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
+    view = load_option_quality(
+        now,
+        spot,
+        float(opening.high_boundary or 0),
+        float(opening.low_boundary or 0),
+        bool(opening.ready),
+    )
+    gemini_ok, gemini_why = quality_allows(signal, view)
+    with desk_lock():
+        return run_nifty_cycle(
+            now=now,
+            broker=broker,
+            settings=settings,
+            controls=controls,
+            spot=spot,
+            candles=candles,
+            quotes=quotes if signal in {"BUY", "SELL"} else None,
+            journal=TradeJournal(NIFTY2_JOURNAL),
+            gemini_ok=gemini_ok,
+            gemini_why=gemini_why,
+            buy_tag="NIFTY2-OPT",
+            exit_tag="OPT2-EXIT",
         )
 
 
@@ -522,9 +594,9 @@ def _traded_today(broker: PaperTradingBroker, now: datetime) -> bool:
     return any(str(row.get("Timestamp") or "").startswith(day) for row in rows)
 
 
-def _write_status(now: datetime, nifty: str, bank: str) -> None:
+def _write_status(now: datetime, nifty: str, bank: str, nifty2: str = "") -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"updated_at": now.isoformat(), "nifty": nifty, "banknifty": bank}
+    payload = {"updated_at": now.isoformat(), "nifty": nifty, "nifty2": nifty2, "banknifty": bank}
     text = json.dumps(payload, indent=2)
     tmp = STATUS_PATH.with_suffix(".json.tmp")
     tmp.write_text(text, encoding="utf-8")

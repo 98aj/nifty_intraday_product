@@ -30,6 +30,7 @@ inject_css()
 navigation = st.navigation(
     [
         st.Page("modules/ui/desk_page.py", title="Live desk", default=True),
+        st.Page("modules/ui/nifty2_desk_page.py", title="Nifty 2"),
         st.Page("modules/ui/banknifty_desk_page.py", title="Bank Nifty"),
         st.Page("modules/ui/backtest_page.py", title="Backtest"),
     ]
