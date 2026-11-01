@@ -49,7 +49,8 @@ def render_desk() -> None:
     settings = load_settings()
     _bootstrap()
     destination, paused = _top_bar()
-    capital, lots, stop_frac, target_frac, max_loss = _money_row()
+    capital, lots, stop_frac, target_frac = _money_row()
+    trail_armed, trail_activate_frac, trail_frac = _trail_row()
     _live_gate(settings, destination)
     save_desk_controls(
         "nifty2",
@@ -58,10 +59,12 @@ def render_desk() -> None:
             "lots": int(lots),
             "stop_frac": float(stop_frac),
             "target_frac": float(target_frac),
-            "max_loss": float(max_loss),
             "destination": destination,
             "paused": bool(paused),
             "live_armed": bool(st.session_state.get("n2_live_armed")),
+            "trail_armed": bool(trail_armed),
+            "trail_activate_frac": float(trail_activate_frac),
+            "trail_frac": float(trail_frac),
         },
     )
 
@@ -72,7 +75,7 @@ def render_desk() -> None:
     @st.fragment(run_every=REFRESH_SECONDS)
     def _live() -> None:
         with live_slot.container():
-            _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac, max_loss)
+            _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac)
 
     _live()
 
@@ -85,7 +88,6 @@ def _render_live(
     lots: int,
     stop_frac: float,
     target_frac: float,
-    max_loss: float,
 ) -> None:
     now = datetime.now(IST)
     broker = PaperTradingBroker(NIFTY2_PORTFOLIO_PATH)
@@ -120,7 +122,8 @@ def _render_live(
 
     preview, lot_note = (None, "")
     if sample is not None:
-        preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac, max_loss)
+        # No per-trade loss cap on this desk: only the capital limits the order.
+        preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac, None)
     order = preview if contract is not None else None
 
     if not loop_is_fresh(now):
@@ -146,7 +149,7 @@ def _render_live(
         gemini_why,
     )
     _show_quality(quality_box, quality)
-    _show_lot_cost(sample, preview, lot_note, lots, max_loss, now)
+    _show_lot_cost(sample, preview, lot_note, lots, now)
     _show_ticket(order, paused, broker, now, allowed_by_gemini)
     _render_book(broker, capital)
     st.caption(
@@ -160,10 +163,12 @@ def _bootstrap() -> None:
     st.session_state.setdefault("n2_initial_capital", 500_000.0)
     st.session_state.setdefault("n2_trade_lots", 1)
     st.session_state.setdefault("n2_premium_stop_pct", 40)
-    st.session_state.setdefault("n2_premium_target_pct", 60)
-    st.session_state.setdefault("n2_premium_max_loss", 3000.0)
+    st.session_state.setdefault("n2_premium_target_pct", 100)
     st.session_state.setdefault("n2_machine_paused", False)
     st.session_state.setdefault("n2_live_armed", False)
+    st.session_state.setdefault("n2_trail_armed", True)
+    st.session_state.setdefault("n2_trail_activate_pct", 40)
+    st.session_state.setdefault("n2_trail_give_pct", 30)
     st.session_state.setdefault("n2_flash", "")
     st.session_state.setdefault("n2_flash_error", "")
 
@@ -195,8 +200,8 @@ def _top_bar() -> tuple[str, bool]:
     return destination, paused
 
 
-def _money_row() -> tuple[float, int, float, float, float]:
-    capital_col, lots_col, stop_col, target_col, loss_col = st.columns(5)
+def _money_row() -> tuple[float, int, float, float]:
+    capital_col, lots_col, stop_col, target_col = st.columns(4)
     capital = capital_col.number_input(
         "Starting capital (₹)",
         min_value=1_000.0,
@@ -220,28 +225,53 @@ def _money_row() -> tuple[float, int, float, float, float]:
         step=5,
         key="n2_premium_target_pct",
     )
-    max_loss = loss_col.number_input(
-        "Max loss (₹)",
-        min_value=1_000.0,
-        max_value=50_000.0,
-        step=500.0,
-        format="%.0f",
-        key="n2_premium_max_loss",
-    )
     return (
         float(capital),
         int(lots),
         float(stop_pct) / 100.0,
         float(target_pct) / 100.0,
-        float(max_loss),
     )
 
 
-def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, max_loss: float, now: datetime) -> None:
+def _trail_row() -> tuple[bool, float, float]:
+    """Trailing stop controls. This desk is the only one that trails.
+
+    The trail stays off until the premium is up by ``activate %``, then follows
+    the peak down, selling if it gives back ``give back %``. The fixed stop and
+    target above still apply, so the trail only ever tightens the exit.
+    """
+
+    armed_col, activate_col, give_col = st.columns(3)
+    armed = armed_col.checkbox("Trailing stop", key="n2_trail_armed")
+    activate_pct = activate_col.number_input(
+        "Start trailing after profit (%)",
+        min_value=0,
+        max_value=200,
+        step=5,
+        key="n2_trail_activate_pct",
+        disabled=not armed,
+    )
+    give_pct = give_col.number_input(
+        "Give back from peak (%)",
+        min_value=5,
+        max_value=60,
+        step=5,
+        key="n2_trail_give_pct",
+        disabled=not armed,
+    )
+    if armed:
+        st.caption(
+            f"Once the option is up {int(activate_pct)}%, it trails the peak and sells if the price "
+            f"falls {int(give_pct)}% from that peak — never below the fixed stop above."
+        )
+    return bool(armed), float(activate_pct) / 100.0, float(give_pct) / 100.0
+
+
+def _show_lot_cost(sample: OptionQuote | None, preview, note: str, lots: int, now: datetime) -> None:
     if sample is None:
         st.caption(
-            "Pick how many lots to buy. Nifty’s exchange lot is 65. A trade is skipped if the "
-            f"cash exceeds your capital, or the stop can lose more than ₹{max_loss:,.0f}."
+            "Pick how many lots to buy. Nifty’s exchange lot is 65. This desk has no per-trade "
+            "loss cap — a trade is only skipped if the cash exceeds your capital."
         )
         return
     st.caption(_contract_line(sample, now))
@@ -538,6 +568,10 @@ def _exit_locked(broker, settings: Settings, now: datetime) -> None:
         if symbol not in prices:
             prices[symbol] = float(row.get("ExecutionPrice") or 0.0)
     broker.mark_to_market(prices)
+    trail_armed = bool(st.session_state.get("n2_trail_armed"))
+    trail_activate_frac = float(st.session_state.get("n2_trail_activate_pct") or 0) / 100.0 if trail_armed else 0.0
+    trail_frac = float(st.session_state.get("n2_trail_give_pct") or 0) / 100.0 if trail_armed else 0.0
+    peaks = broker.bump_peaks(prices) if trail_frac > 0.0 else {}
     for row in list(broker.open_positions()):
         symbol = str(row.get("Ticker") or "")
         reason = manage_exit(
@@ -546,6 +580,9 @@ def _exit_locked(broker, settings: Settings, now: datetime) -> None:
             float(row.get("StopLoss") or 0.0),
             float(row.get("target_premium") or 0.0),
             now,
+            peak_premium=float(peaks.get(symbol) or 0.0),
+            trail_activate_frac=trail_activate_frac,
+            trail_frac=trail_frac,
         )
         if not reason:
             continue

@@ -292,6 +292,37 @@ class PaperTradingBroker:
                 self._write(book)
             return [dict(row) for row in rows]
 
+    def bump_peaks(self, ltp_by_ticker: dict[str, float]) -> dict[str, float]:
+        """Raise each open row's high-water premium, for trailing-stop desks.
+
+        Returns the current peak per open ticker. A row seeds its peak at the
+        entry premium, so a position that has only fallen keeps ``peak == entry``
+        and a trailing stop built from it never arms. Only desks that pass
+        trailing arguments call this; it is a no-op for the fixed-stop desks.
+        """
+
+        prices = ltp_by_ticker or {}
+        peaks: dict[str, float] = {}
+        with self._lock:
+            book = self._read()
+            changed = False
+            for pos in book.get("positions") or []:
+                if pos.get("status") != "OPEN":
+                    continue
+                ticker = str(pos.get("Ticker") or "")
+                entry = float(pos.get("ExecutionPrice") or 0.0)
+                ltp = float(prices.get(ticker) or entry)
+                prev = float(pos.get("peak_premium") or entry)
+                peak = max(prev, ltp, entry)
+                if peak != prev:
+                    pos["peak_premium"] = peak
+                    changed = True
+                peaks[ticker] = peak
+            if changed:
+                book["updated_at"] = datetime.now(IST).isoformat()
+                self._write(book)
+        return peaks
+
     def open_positions(self) -> list[dict[str, Any]]:
         with self._lock:
             return [row for row in self._read().get("positions") or [] if row.get("status") == "OPEN"]

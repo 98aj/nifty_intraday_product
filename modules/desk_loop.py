@@ -134,18 +134,28 @@ def load_nifty_controls(path: Path | None = None) -> dict[str, Any]:
 
 
 def load_nifty2_controls(path: Path | None = None) -> dict[str, Any]:
-    """Second Nifty desk. Same defaults as the first, read from its own file."""
+    """Second Nifty desk. Its own file, and the only desk with a trailing stop.
+
+    Backtests on this book favoured a wider take-profit plus a profit-activated
+    trailing stop, so this desk defaults to a 100% target cap with the trail
+    armed (it arms at +40% profit and gives back 30% from the peak). The Nifty
+    and Bank Nifty desks keep their fixed stop/target and never read these keys.
+    """
 
     raw = _read_json(path or NIFTY2_CONTROLS)
     return {
         "capital": _float(raw.get("capital"), 500_000.0),
         "lots": max(1, _int(raw.get("lots"), 1)),
         "stop_frac": _float(raw.get("stop_frac"), 0.40),
-        "target_frac": _float(raw.get("target_frac"), 0.60),
-        "max_loss": _float(raw.get("max_loss"), 3000.0),
+        "target_frac": _float(raw.get("target_frac"), 1.00),
+        # No max_loss key: the Nifty 2 desk deliberately has no per-trade loss
+        # cap, so an order is limited only by the available capital.
         "destination": _mode(raw.get("destination")),
         "paused": bool(raw.get("paused")),
         "live_armed": bool(raw.get("live_armed")),
+        "trail_armed": bool(raw.get("trail_armed", True)),
+        "trail_activate_frac": _float(raw.get("trail_activate_frac"), 0.40),
+        "trail_frac": _float(raw.get("trail_frac"), 0.30),
     }
 
 
@@ -191,7 +201,19 @@ def run_nifty_cycle(
     signal = "SCANNING"
     if opening.ready and spot > 0:
         signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    exit_note = _exit_open(broker, settings, now, book, prices, place_order, exit_tag)
+    # Trailing stop is opt-in per desk: only controls that carry trail_frac (the
+    # Nifty 2 desk) arm it. Nifty's controls omit these keys, so it stays fixed.
+    exit_note = _exit_open(
+        broker,
+        settings,
+        now,
+        book,
+        prices,
+        place_order,
+        exit_tag,
+        trail_activate_frac=float(controls.get("trail_activate_frac") or 0.0) if controls.get("trail_armed") else 0.0,
+        trail_frac=float(controls.get("trail_frac") or 0.0) if controls.get("trail_armed") else 0.0,
+    )
     if controls.get("paused"):
         return exit_note or "Paused. No new Nifty buy."
     if _traded_today(broker, now):
@@ -211,7 +233,7 @@ def run_nifty_cycle(
         float(controls["capital"]),
         float(controls["stop_frac"]),
         float(controls["target_frac"]),
-        float(controls.get("max_loss") or 3000.0),
+        _loss_cap(controls),
     )
     if order is None:
         return note or "One lot does not fit the loss limit."
@@ -519,12 +541,24 @@ def _buy(broker, settings, controls, now, order, journal: TradeJournal, place_or
     return f"{prefix} BUY {order.lots} lot(s) {order.contract.trading_symbol} @ ₹{order.premium:,.2f}"
 
 
-def _exit_open(broker, settings, now, journal, prices, place_order, tag: str) -> str:
+def _exit_open(
+    broker,
+    settings,
+    now,
+    journal,
+    prices,
+    place_order,
+    tag: str,
+    trail_activate_frac: float = 0.0,
+    trail_frac: float = 0.0,
+) -> str:
     opens = broker.open_positions()
     if not opens:
         return ""
     marks = dict(prices) if prices is not None else _live_prices(settings, opens)
     broker.mark_to_market(marks)
+    # Only trailing desks track a high-water premium; fixed-stop desks pass 0.0.
+    peaks = broker.bump_peaks(marks) if trail_frac > 0.0 else {}
     notes: list[str] = []
     for row in list(broker.open_positions()):
         symbol = str(row.get("Ticker") or "")
@@ -534,6 +568,9 @@ def _exit_open(broker, settings, now, journal, prices, place_order, tag: str) ->
             float(row.get("StopLoss") or 0.0),
             float(row.get("target_premium") or 0.0),
             now,
+            peak_premium=float(peaks.get(symbol) or 0.0),
+            trail_activate_frac=trail_activate_frac,
+            trail_frac=trail_frac,
         )
         if not reason:
             continue
@@ -672,6 +709,18 @@ def _int(value: Any, default: int) -> int:
 def _mode(value: Any) -> str:
     mode = str(value or "PAPER").upper()
     return mode if mode in {"PAPER", "LIVE"} else "PAPER"
+
+
+def _loss_cap(controls: dict[str, Any]) -> float | None:
+    """Per-trade loss cap, or None when the desk has none (the Nifty 2 desk).
+
+    Nifty and Bank Nifty always carry ``max_loss`` in their controls, so they
+    keep the cap. The Nifty 2 controls omit it, so its orders are only limited
+    by the available capital.
+    """
+
+    raw = controls.get("max_loss")
+    return float(raw) if raw else None
 
 
 if __name__ == "__main__":

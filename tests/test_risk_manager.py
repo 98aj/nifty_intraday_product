@@ -7,6 +7,19 @@ from config.settings import IST
 from modules.risk.risk_manager import PaperTradingBroker, RiskInterceptor
 
 
+def test_bump_peaks_only_rises_and_seeds_at_entry(tmp_path: Path) -> None:
+    broker = PaperTradingBroker(tmp_path / "book.json")
+    broker.fill("NIFTY 100 CE", "BUY", 65, 100.0, 60.0, "tok", extra={"target_premium": 200.0})
+
+    # No mark yet -> the peak seeds at the entry premium, never below it.
+    assert broker.bump_peaks({}) == {"NIFTY 100 CE": 100.0}
+    # A higher mark lifts the peak...
+    assert broker.bump_peaks({"NIFTY 100 CE": 150.0}) == {"NIFTY 100 CE": 150.0}
+    # ...and a later pullback never lowers it.
+    assert broker.bump_peaks({"NIFTY 100 CE": 120.0}) == {"NIFTY 100 CE": 150.0}
+    assert float(broker.open_positions()[0]["peak_premium"]) == 150.0
+
+
 def test_interceptor_blocks_invalid_size() -> None:
     gate = RiskInterceptor()
     now = datetime(2026, 4, 8, 10, 0, tzinfo=IST)

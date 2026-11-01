@@ -61,6 +61,7 @@ NUMERIC_COLUMNS = [
 _EXIT_WORDS = {
     "PREMIUM_STOP": "Price fell to the stop",
     "PREMIUM_TARGET": "Price hit the target",
+    "TRAILING_STOP": "Trailing stop locked in profit",
     "SQUARE_OFF_1500": "Sold at 3:00 pm",
     "SQUARE_OFF_1515": "Sold at 3:15 pm",
     "EMERGENCY_CLOSE": "Closed by hand",

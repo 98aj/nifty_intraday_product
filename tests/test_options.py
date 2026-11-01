@@ -151,6 +151,32 @@ def test_manage_exit_stop_target_and_flatten() -> None:
     assert manage_exit(100, 110, 60, 150, late) == "SQUARE_OFF_1500"
 
 
+def test_manage_exit_trailing_only_arms_in_profit_and_ratchets() -> None:
+    morning = datetime(2026, 10, 12, 11, 0, tzinfo=IST)
+    # entry 100, fixed stop 60, target 200, trail arms at +40% (peak>=140), gives back 30%.
+    trail = dict(trail_activate_frac=0.40, trail_frac=0.30)
+
+    # Peak still below the activation level: only the fixed stop is in force.
+    assert manage_exit(100, 120, 60, 200, morning, peak_premium=130, **trail) is None
+    assert manage_exit(100, 55, 60, 200, morning, peak_premium=130, **trail) == "PREMIUM_STOP"
+
+    # Peak 160 -> armed, trailing stop at 160*0.70 = 112.
+    assert manage_exit(100, 115, 60, 200, morning, peak_premium=160, **trail) is None
+    assert manage_exit(100, 112, 60, 200, morning, peak_premium=160, **trail) == "TRAILING_STOP"
+    assert manage_exit(100, 111, 60, 200, morning, peak_premium=160, **trail) == "TRAILING_STOP"
+
+    # The trail never loosens below the fixed stop, and the target still caps the upside.
+    assert manage_exit(100, 70, 60, 200, morning, peak_premium=100, **trail) is None
+    assert manage_exit(100, 200, 60, 200, morning, peak_premium=160, **trail) == "PREMIUM_TARGET"
+
+    # 15:00 square-off wins over everything.
+    late = datetime(2026, 10, 12, 15, 0, tzinfo=IST)
+    assert manage_exit(100, 115, 60, 200, late, peak_premium=160, **trail) == "SQUARE_OFF_1500"
+
+    # With no trailing arguments the behaviour is exactly the old fixed rule.
+    assert manage_exit(100, 115, 60, 200, morning) is None
+
+
 def test_parse_chain_reads_upstox_leg() -> None:
     chain = [
         {

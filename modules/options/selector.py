@@ -187,7 +187,7 @@ def affordable_order(
     capital: float,
     stop_frac: float,
     target_frac: float,
-    daily_loss_cap: float = 3000.0,
+    daily_loss_cap: float | None = 3000.0,
     max_otm_steps: int = 3,
 ) -> tuple[SizedOrder | None, str]:
     """Size the ATM option; when it is too expensive, step out of the money.
@@ -257,12 +257,14 @@ def order_for_lots(
     capital: float,
     stop_frac: float,
     target_frac: float,
-    daily_loss_cap: float = 3000.0,
+    daily_loss_cap: float | None = 3000.0,
 ) -> tuple[SizedOrder | None, str]:
     """Price a lot count the user picked.
 
     The order is refused when the premium does not fit the capital, or when
-    the planned stop would lose more than the daily cap.
+    the planned stop would lose more than the daily cap. Pass
+    ``daily_loss_cap=None`` to drop the loss cap entirely (the Nifty 2 desk does
+    this) — only the capital check then applies.
     """
 
     chosen = int(lots)
@@ -275,7 +277,7 @@ def order_for_lots(
             f"{chosen} lot(s) need about ₹{cash:,.0f}. "
             f"That is more than the ₹{capital:,.0f} capital."
         )
-    if risk > daily_loss_cap:
+    if daily_loss_cap is not None and risk > daily_loss_cap:
         per_lot = contract.ltp * contract.lot_size * stop_frac
         room = floor(daily_loss_cap / per_lot) if per_lot > 0 else 0
         fewer = f" Use {room} lot(s) or fewer." if room else " Even 1 lot is over that limit at this price."
@@ -336,13 +338,47 @@ def entry_allowed(now: datetime, index_side: str) -> tuple[bool, str]:
     return True, "ok"
 
 
-def manage_exit(entry_premium: float, ltp: float, stop_premium: float, target_premium: float, now: datetime) -> str | None:
-    """Why a long option should be sold, or None to hold."""
+def manage_exit(
+    entry_premium: float,
+    ltp: float,
+    stop_premium: float,
+    target_premium: float,
+    now: datetime,
+    peak_premium: float = 0.0,
+    trail_activate_frac: float = 0.0,
+    trail_frac: float = 0.0,
+) -> str | None:
+    """Why a long option should be sold, or None to hold.
+
+    By default this is the fixed stop / target / 15:00 square-off rule, and the
+    three trailing arguments stay at zero. When ``trail_frac`` is positive, a
+    profit-activated trailing stop is layered on top:
+
+    * The trail only arms once the premium has reached its peak
+      ``entry_premium * (1 + trail_activate_frac)`` — i.e. the trade is already
+      that far in profit. Before that, only the original fixed stop applies.
+    * Once armed, the effective stop ratchets up to
+      ``peak_premium * (1 - trail_frac)`` and never loosens, because it is taken
+      as ``max(stop_premium, trailing_stop)``.
+    * The fixed target is kept as an upper cap.
+
+    This is opt-in per desk: callers that pass no trailing arguments (Nifty and
+    Bank Nifty) get exactly the old behaviour.
+    """
 
     if _clock(now) >= FLATTEN_AT:
         return "SQUARE_OFF_1500"
-    if ltp > 0 and stop_premium > 0 and ltp <= stop_premium:
-        return "PREMIUM_STOP"
+    effective_stop = stop_premium
+    trailing = (
+        trail_frac > 0.0
+        and entry_premium > 0.0
+        and peak_premium >= entry_premium * (1.0 + trail_activate_frac)
+    )
+    if trailing:
+        trailing_stop = peak_premium * (1.0 - trail_frac)
+        effective_stop = max(stop_premium, trailing_stop)
+    if ltp > 0 and effective_stop > 0 and ltp <= effective_stop:
+        return "TRAILING_STOP" if trailing and effective_stop > stop_premium else "PREMIUM_STOP"
     if ltp > 0 and target_premium > 0 and ltp >= target_premium:
         return "PREMIUM_TARGET"
     return None
