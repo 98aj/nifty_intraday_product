@@ -8,8 +8,13 @@ if (-not (Test-Path $Python)) {
     exit 1
 }
 
+# Only touch processes started from THIS folder. Each folder runs its own
+# .venv python, so its full path is in the process command line — matching on
+# it lets a second clone start/stop independently of another running instance.
+$RootPattern = [regex]::Escape($Root)
+
 $Runner = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -match 'modules.desk_loop' })
+    Where-Object { $_.CommandLine -match 'modules.desk_loop' -and $_.CommandLine -match $RootPattern })
 $StartedRunner = $false
 if ($Runner.Count -eq 0) {
     Start-Process -FilePath $Python -ArgumentList "-m","modules.desk_loop" -WorkingDirectory $Root -WindowStyle Hidden
@@ -18,7 +23,7 @@ if ($Runner.Count -eq 0) {
 }
 
 $Running = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
-    Where-Object { $_.CommandLine -match 'streamlit run app.py' }
+    Where-Object { $_.CommandLine -match 'streamlit run app.py' -and $_.CommandLine -match $RootPattern }
 if ($Running) {
     Write-Output "The desk is already running. Open http://localhost:8502 when you want to look."
     exit 0
@@ -32,7 +37,7 @@ try {
 finally {
     if ($StartedRunner) {
         Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
-            Where-Object { $_.CommandLine -match 'modules.desk_loop' } |
+            Where-Object { $_.CommandLine -match 'modules.desk_loop' -and $_.CommandLine -match $RootPattern } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
     }
 }
