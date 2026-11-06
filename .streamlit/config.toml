@@ -9,6 +9,10 @@ font = "sans serif"
 [server]
 headless = true
 runOnSave = true
+port = 8502
+# Serve the live-price snapshot the desk writes so the tile component can poll it
+# from the browser (reachable at /app/static/<file>) without a Python rerun.
+enableStaticServing = true
 
 [browser]
 gatherUsageStats = false

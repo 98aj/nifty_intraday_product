@@ -1,7 +1,6 @@
-"""Nifty weekly options and a Bank Nifty late-session desk.
+"""Nifty weekly options live desk.
 
-The Nifty live desk is the first page. Bank Nifty and Backtest follow.
-Keep each page function in ``modules/ui``.
+The Nifty live desk is the only page. Keep the page function in ``modules/ui``.
 
 `streamlit run app.py`
 """
@@ -30,9 +29,6 @@ inject_css()
 navigation = st.navigation(
     [
         st.Page("modules/ui/desk_page.py", title="Live desk", default=True),
-        st.Page("modules/ui/nifty2_desk_page.py", title="Nifty 2"),
-        st.Page("modules/ui/banknifty_desk_page.py", title="Bank Nifty"),
-        st.Page("modules/ui/backtest_page.py", title="Backtest"),
     ]
 )
 navigation.run()

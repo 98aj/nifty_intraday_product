@@ -1,4 +1,4 @@
-"""Order clock for the instance. It does not decide a new Nifty or Bank Nifty rule.
+"""Order clock for the instance. It does not decide a new Nifty rule.
 
 The Live desk page used to be the only place a buy could be sent, so a browser
 had to stay open. This process calls those same checks every few seconds.
@@ -25,26 +25,16 @@ from modules.options.selector import (
     OptionQuote,
     affordable_order,
     entry_allowed,
-    listed_lot_size,
     lot_size_for,
     manage_exit,
-    nearest_listed_expiry,
     nearest_weekly_expiry,
     parse_chain_rows,
 )
-from modules.risk.risk_manager import BANKNIFTY_PORTFOLIO_PATH, NIFTY2_PORTFOLIO_PATH, PaperTradingBroker
-from modules.strategy.banknifty_late import (
-    MAX_LOSS_INR,
-    PREMIUM_STOP_PCT,
-    PREMIUM_TARGET_PCT,
-    calculate_session_range,
-    evaluate_late_break,
-    late_entry_allowed,
-)
+from modules.risk.risk_manager import PaperTradingBroker
 from modules.strategy.orb import calculate_opening_range, evaluate_market_signals
+from modules.upstox.feed import get_feed
 from modules.upstox.market_data import get_full_quote, get_historical_candles
 from modules.upstox.option_chain import (
-    BANKNIFTY_INDEX_KEY,
     NIFTY_INDEX_KEY,
     fetch_nifty_contracts,
     fetch_option_chain,
@@ -54,16 +44,10 @@ LOGGER = logging.getLogger("desk.loop")
 STATUS_PATH = PROJECT_ROOT / "data" / "desk_loop_status.json"
 LOCK_PATH = PROJECT_ROOT / "data" / "desk_loop.lock"
 NIFTY_CONTROLS = PROJECT_ROOT / "data" / "nifty_desk.json"
-NIFTY2_CONTROLS = PROJECT_ROOT / "data" / "nifty2_desk.json"
-BANK_CONTROLS = PROJECT_ROOT / "data" / "banknifty_desk.json"
-NIFTY2_JOURNAL = PROJECT_ROOT / "data" / "nifty2"
-BANK_JOURNAL = PROJECT_ROOT / "data" / "banknifty"
 
 # A desk's controls file is chosen by name. New desks register here.
 CONTROLS_PATHS = {
     "nifty": NIFTY_CONTROLS,
-    "nifty2": NIFTY2_CONTROLS,
-    "banknifty": BANK_CONTROLS,
 }
 HEARTBEAT_SECONDS = 30
 LOOP_SECONDS = 5
@@ -99,16 +83,11 @@ def loop_caption(now: datetime | None = None) -> str:
     except (OSError, json.JSONDecodeError):
         raw = {}
     nifty = str(raw.get("nifty") or "watching")
-    nifty2 = str(raw.get("nifty2") or "watching")
-    bank = str(raw.get("banknifty") or "watching")
-    return (
-        "Instance loop is on. This browser can be closed. "
-        f"Nifty: {nifty} Nifty 2: {nifty2} Bank Nifty: {bank}"
-    )
+    return f"Instance loop is on. This browser can be closed. Nifty: {nifty}"
 
 
 def save_desk_controls(name: str, payload: dict[str, Any], path: Path | None = None) -> None:
-    file = path or CONTROLS_PATHS.get(name, BANK_CONTROLS)
+    file = path or CONTROLS_PATHS.get(name, NIFTY_CONTROLS)
     file.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps(payload, indent=2)
     tmp = file.with_suffix(".json.tmp")
@@ -133,46 +112,6 @@ def load_nifty_controls(path: Path | None = None) -> dict[str, Any]:
     }
 
 
-def load_nifty2_controls(path: Path | None = None) -> dict[str, Any]:
-    """Second Nifty desk. Its own file, and the only desk with a trailing stop.
-
-    Backtests on this book favoured a wider take-profit plus a profit-activated
-    trailing stop, so this desk defaults to a 100% target cap with the trail
-    armed (it arms at +40% profit and gives back 30% from the peak). The Nifty
-    and Bank Nifty desks keep their fixed stop/target and never read these keys.
-    """
-
-    raw = _read_json(path or NIFTY2_CONTROLS)
-    return {
-        "capital": _float(raw.get("capital"), 500_000.0),
-        "lots": max(1, _int(raw.get("lots"), 1)),
-        "stop_frac": _float(raw.get("stop_frac"), 0.40),
-        "target_frac": _float(raw.get("target_frac"), 1.00),
-        # No max_loss key: the Nifty 2 desk deliberately has no per-trade loss
-        # cap, so an order is limited only by the available capital.
-        "destination": _mode(raw.get("destination")),
-        "paused": bool(raw.get("paused")),
-        "live_armed": bool(raw.get("live_armed")),
-        "trail_armed": bool(raw.get("trail_armed", True)),
-        "trail_activate_frac": _float(raw.get("trail_activate_frac"), 0.40),
-        "trail_frac": _float(raw.get("trail_frac"), 0.30),
-    }
-
-
-def load_bank_controls(path: Path | None = None) -> dict[str, Any]:
-    raw = _read_json(path or BANK_CONTROLS)
-    return {
-        "capital": _float(raw.get("capital"), 500_000.0),
-        "lots": max(1, _int(raw.get("lots"), 1)),
-        "stop_frac": _float(raw.get("stop_frac"), PREMIUM_STOP_PCT / 100.0),
-        "target_frac": _float(raw.get("target_frac"), PREMIUM_TARGET_PCT / 100.0),
-        "max_loss": _float(raw.get("max_loss"), MAX_LOSS_INR),
-        "destination": _mode(raw.get("destination")),
-        "paused": bool(raw.get("paused")),
-        "live_armed": bool(raw.get("live_armed")),
-    }
-
-
 def run_nifty_cycle(
     *,
     now: datetime,
@@ -190,30 +129,14 @@ def run_nifty_cycle(
     buy_tag: str = "NIFTY-OPT",
     exit_tag: str = "OPT-EXIT",
 ) -> str:
-    """One pass of the existing Nifty opening-range rule. No new entry condition.
-
-    The same rule drives the second Nifty desk; it only passes its own journal,
-    broker and order tags so its book stays separate.
-    """
+    """One pass of the existing Nifty opening-range rule. No new entry condition."""
 
     book = journal or TradeJournal()
     opening = calculate_opening_range(candles, now=now)
     signal = "SCANNING"
     if opening.ready and spot > 0:
         signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    # Trailing stop is opt-in per desk: only controls that carry trail_frac (the
-    # Nifty 2 desk) arm it. Nifty's controls omit these keys, so it stays fixed.
-    exit_note = _exit_open(
-        broker,
-        settings,
-        now,
-        book,
-        prices,
-        place_order,
-        exit_tag,
-        trail_activate_frac=float(controls.get("trail_activate_frac") or 0.0) if controls.get("trail_armed") else 0.0,
-        trail_frac=float(controls.get("trail_frac") or 0.0) if controls.get("trail_armed") else 0.0,
-    )
+    exit_note = _exit_open(broker, settings, now, book, prices, place_order, exit_tag)
     if controls.get("paused"):
         return exit_note or "Paused. No new Nifty buy."
     if _traded_today(broker, now):
@@ -240,53 +163,6 @@ def run_nifty_cycle(
     if controls.get("destination") == "LIVE" and not _live_ready(settings, controls):
         return "Live trade is selected, but real orders are not armed."
     return _buy(broker, settings, controls, now, order, book, place_order, buy_tag)
-
-
-def run_bank_cycle(
-    *,
-    now: datetime,
-    broker: PaperTradingBroker,
-    settings: Settings,
-    controls: dict[str, Any],
-    spot: float,
-    candles: pd.DataFrame,
-    quotes: list[OptionQuote] | None = None,
-    journal: TradeJournal | None = None,
-    prices: dict[str, float] | None = None,
-    place_order: Any = None,
-) -> str:
-    """One pass of the existing Bank Nifty 14:00–14:45 rule."""
-
-    book = journal or TradeJournal(BANK_JOURNAL)
-    session = calculate_session_range(candles, now=now)
-    signal = "SCANNING"
-    if session.ready and spot > 0:
-        signal = evaluate_late_break(candles, session.high_boundary, session.low_boundary, now)
-    exit_note = _exit_open(broker, settings, now, book, prices, place_order, "BN-EXIT")
-    if controls.get("paused"):
-        return exit_note or "Paused. No new Bank Nifty buy."
-    if _traded_today(broker, now):
-        return exit_note or "Already bought one Bank Nifty option today."
-    allowed, why = late_entry_allowed(now, signal)
-    if not allowed:
-        return exit_note or why
-    if not quotes or signal not in {"BUY", "SELL"}:
-        return "No at-the-money Bank Nifty option."
-    order, note = affordable_order(
-        quotes,
-        spot,
-        signal,
-        int(controls["lots"]),
-        float(controls["capital"]),
-        float(controls["stop_frac"]),
-        float(controls["target_frac"]),
-        float(controls["max_loss"]),
-    )
-    if order is None:
-        return note or "One lot does not fit the loss limit."
-    if controls.get("destination") == "LIVE" and not _live_ready(settings, controls):
-        return "Live trade is selected, but real orders are not armed."
-    return _buy(broker, settings, controls, now, order, book, place_order, "BN-OPT")
 
 
 @contextmanager
@@ -328,27 +204,25 @@ def desk_lock() -> Iterator[None]:
 def serve() -> None:
     _configure_logging()
     LOGGER.info("Instance trade loop started")
-    _write_status(datetime.now(IST), "Starting.", "Starting.", "Starting.")
+    _write_status(datetime.now(IST), "Starting.")
     while True:
         now = datetime.now(IST)
         nifty_note = "Watching Nifty."
-        nifty2_note = "Watching Nifty."
-        bank_note = "Watching Bank Nifty."
         try:
             settings = load_settings()
             if not settings.upstox_configured:
-                nifty_note = nifty2_note = bank_note = "Add the Upstox token in the .env file."
+                nifty_note = "Add the Upstox token in the .env file."
             elif not market_is_open(now):
-                nifty_note = nifty2_note = bank_note = "Market closed. No quotes pulled."
+                nifty_note = "Market closed. No quotes pulled."
             else:
+                # Keep the index ticks flowing before the first trade decision.
+                get_feed(settings.upstox_access_token, [NIFTY_INDEX_KEY])
                 nifty_note = _nifty_live(settings, now)
-                nifty2_note = _nifty2_live(settings, now)
-                bank_note = _bank_live(settings, now)
         except Exception as exc:
             LOGGER.exception("Instance trade loop failed")
             nifty_note = f"Trade loop error: {exc.__class__.__name__}"
-        _write_status(now, nifty_note, bank_note, nifty2_note)
-        _remember(f"Nifty: {nifty_note} | Nifty 2: {nifty2_note} | Bank Nifty: {bank_note}")
+        _write_status(now, nifty_note)
+        _remember(f"Nifty: {nifty_note}")
         _sleep(now)
 
 
@@ -386,62 +260,26 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
         )
 
 
-def _nifty2_live(settings: Settings, now: datetime) -> str:
-    """Second Nifty desk. Same rule and market data, its own book and tags."""
+def _spot_ltp(key: str, settings: Settings, client: Any) -> float:
+    """Index spot: the latest streamed tick, or the REST quote when none is fresh.
 
-    controls = load_nifty2_controls()
-    broker = PaperTradingBroker(NIFTY2_PORTFOLIO_PATH)
-    spot, candles, quotes = _nifty_market(settings, now)
-    opening = calculate_opening_range(candles, now=now)
-    signal = "SCANNING"
-    if opening.ready and spot > 0:
-        signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    view = load_option_quality(
-        now,
-        spot,
-        float(opening.high_boundary or 0),
-        float(opening.low_boundary or 0),
-        bool(opening.ready),
-    )
-    gemini_ok, gemini_why = quality_allows(signal, view)
-    with desk_lock():
-        return run_nifty_cycle(
-            now=now,
-            broker=broker,
-            settings=settings,
-            controls=controls,
-            spot=spot,
-            candles=candles,
-            quotes=quotes if signal in {"BUY", "SELL"} else None,
-            journal=TradeJournal(NIFTY2_JOURNAL),
-            gemini_ok=gemini_ok,
-            gemini_why=gemini_why,
-            buy_tag="NIFTY2-OPT",
-            exit_tag="OPT2-EXIT",
-        )
+    Only the *source* of the number changes. The value handed to the opening-range
+    and signal functions is the same ``float`` it has always been, so the rule is
+    untouched; it simply reacts to a fresher price.
+    """
 
-
-def _bank_live(settings: Settings, now: datetime) -> str:
-    controls = load_bank_controls()
-    broker = PaperTradingBroker(BANKNIFTY_PORTFOLIO_PATH)
-    spot, candles, quotes, signal = _bank_market(settings, now)
-    with desk_lock():
-        return run_bank_cycle(
-            now=now,
-            broker=broker,
-            settings=settings,
-            controls=controls,
-            spot=spot,
-            candles=candles,
-            quotes=quotes if signal in {"BUY", "SELL"} else None,
-        )
+    if settings.upstox_configured:
+        live = get_feed(settings.upstox_access_token, [key]).last_price(key)
+        if live is not None:
+            return float(live)
+    return float(get_full_quote(key, client=client).last_price)
 
 
 def _nifty_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, list[OptionQuote]]:
     from modules.upstox.client import UpstoxClient
 
     client = UpstoxClient(settings.upstox_access_token)
-    spot = float(get_full_quote(NIFTY_INDEX_KEY, client=client).last_price)
+    spot = _spot_ltp(NIFTY_INDEX_KEY, settings, client)
     candles = _candles(client, NIFTY_INDEX_KEY, now, days=3)
     opening = calculate_opening_range(candles, now=now)
     signal = "SCANNING"
@@ -456,28 +294,6 @@ def _nifty_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFram
     chain = _chain(client, NIFTY_INDEX_KEY, expiry)
     quotes = parse_chain_rows(chain, expiry, lot_size_for(rows, expiry))
     return spot, candles, quotes
-
-
-def _bank_market(settings: Settings, now: datetime) -> tuple[float, pd.DataFrame, list[OptionQuote], str]:
-    from modules.upstox.client import UpstoxClient
-
-    client = UpstoxClient(settings.upstox_access_token)
-    spot = float(get_full_quote(BANKNIFTY_INDEX_KEY, client=client).last_price)
-    candles = _candles(client, BANKNIFTY_INDEX_KEY, now, days=7)
-    session = calculate_session_range(candles, now=now)
-    signal = "SCANNING"
-    if session.ready and spot > 0:
-        signal = evaluate_late_break(candles, session.high_boundary, session.low_boundary, now)
-    if spot <= 0 or signal not in {"BUY", "SELL"}:
-        return spot, candles, [], signal
-    rows = fetch_nifty_contracts(client, BANKNIFTY_INDEX_KEY)
-    expiry = nearest_listed_expiry(rows, now.date())
-    lot_size = listed_lot_size(rows, expiry or "")
-    if not expiry or lot_size is None:
-        return spot, candles, [], signal
-    chain = _chain(client, BANKNIFTY_INDEX_KEY, expiry)
-    quotes = [row for row in parse_chain_rows(chain, expiry, lot_size) if row.lot_size > 0]
-    return spot, candles, quotes, signal
 
 
 def _candles(client: Any, key: str, now: datetime, days: int) -> pd.DataFrame:
@@ -598,11 +414,26 @@ def _exit_open(
 
 
 def _live_prices(settings: Settings, rows: list[dict]) -> dict[str, float]:
+    """Marks for the open options, stream-first so stops react on the tick.
+
+    For each position: use the latest streamed tick if there is one; otherwise
+    make sure the option is subscribed (so the next cycle has a tick) and fall
+    back to the same REST quote used before, then to the entry price. The exit
+    rule (``manage_exit``) sees the identical ``float`` mark either way.
+    """
+
     prices: dict[str, float] = {}
+    feed = get_feed(settings.upstox_access_token) if settings.upstox_configured else None
     for row in rows:
         symbol = str(row.get("Ticker") or "")
         token = str(row.get("instrument_token") or "")
         if token and settings.upstox_configured:
+            live = feed.last_price(token) if feed else None
+            if live is not None:
+                prices[symbol] = float(live)
+                continue
+            if feed is not None:
+                feed.subscribe([token])
             try:
                 prices[symbol] = get_full_quote(token, access_token=settings.upstox_access_token).last_price
                 continue
@@ -633,9 +464,9 @@ def _traded_today(broker: PaperTradingBroker, now: datetime) -> bool:
     return any(str(row.get("Timestamp") or "").startswith(day) for row in rows)
 
 
-def _write_status(now: datetime, nifty: str, bank: str, nifty2: str = "") -> None:
+def _write_status(now: datetime, nifty: str) -> None:
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"updated_at": now.isoformat(), "nifty": nifty, "nifty2": nifty2, "banknifty": bank}
+    payload = {"updated_at": now.isoformat(), "nifty": nifty}
     text = json.dumps(payload, indent=2)
     tmp = STATUS_PATH.with_suffix(".json.tmp")
     tmp.write_text(text, encoding="utf-8")
@@ -712,12 +543,7 @@ def _mode(value: Any) -> str:
 
 
 def _loss_cap(controls: dict[str, Any]) -> float | None:
-    """Per-trade loss cap, or None when the desk has none (the Nifty 2 desk).
-
-    Nifty and Bank Nifty always carry ``max_loss`` in their controls, so they
-    keep the cap. The Nifty 2 controls omit it, so its orders are only limited
-    by the available capital.
-    """
+    """Per-trade loss cap. The Nifty desk always carries ``max_loss``."""
 
     raw = controls.get("max_loss")
     return float(raw) if raw else None

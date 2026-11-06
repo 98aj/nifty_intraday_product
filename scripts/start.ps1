@@ -1,4 +1,4 @@
-# Start the Nifty options desk at http://localhost:8501
+# Start the Nifty options desk at http://localhost:8502
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
 
@@ -20,14 +20,14 @@ if ($Runner.Count -eq 0) {
 $Running = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" |
     Where-Object { $_.CommandLine -match 'streamlit run app.py' }
 if ($Running) {
-    Write-Output "The desk is already running. Open http://localhost:8501 when you want to look."
+    Write-Output "The desk is already running. Open http://localhost:8502 when you want to look."
     exit 0
 }
 
-Write-Output "Starting the desk at http://localhost:8501"
+Write-Output "Starting the desk at http://localhost:8502"
 Write-Output "Leave this window open on the instance. Close the browser whenever you want. Run stop.bat to shut it down."
 try {
-    & $Python -m streamlit run app.py --server.headless true --server.port 8501 --browser.gatherUsageStats false
+    & $Python -m streamlit run app.py --server.headless true --server.port 8502 --browser.gatherUsageStats false
 }
 finally {
     if ($StartedRunner) {

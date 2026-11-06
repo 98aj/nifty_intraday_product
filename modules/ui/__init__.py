@@ -1,4 +1,4 @@
-"""Streamlit pages. The live desk and the backtest are registered in `app.py`."""
+"""Streamlit pages. The live desk is registered in `app.py`."""
 
 from modules.ui.styles import inject_css
 

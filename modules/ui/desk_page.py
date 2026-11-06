@@ -26,6 +26,8 @@ from modules.options.selector import (
 from modules.risk.risk_manager import PaperTradingBroker
 from modules.strategy.orb import calculate_opening_range, evaluate_market_signals
 from modules.upstox.client import UpstoxClient
+from modules.ui.live_tiles import live_market_tiles, write_tile_state
+from modules.upstox.feed import read_snapshot_price
 from modules.upstox.market_data import get_full_quote, get_historical_candles
 from modules.upstox.option_chain import NIFTY_INDEX_KEY, fetch_nifty_contracts, fetch_option_chain
 from modules.upstox.orders import place_mis_market_order
@@ -61,14 +63,18 @@ def render_desk() -> None:
         },
     )
 
-    # The live view redraws itself in place every few seconds. Only this slot
-    # updates on the timer, so the inputs above never flicker or reset.
-    live_slot = st.empty()
+    # Live number tiles: rendered once, here, OUTSIDE the refresh fragment. Their
+    # own JavaScript polls the snapshot and updates the spot in place every second,
+    # so the price ticks live with no Python rerun and no scroll jump. The desk
+    # writes their values each refresh via write_tile_state().
+    live_market_tiles(NIFTY_INDEX_KEY, state_name="nifty")
 
+    # The rest of the live view redraws every few seconds. The fragment owns only
+    # this slice; Streamlit patches its elements in place on each run, so the
+    # inputs above never flicker and the page does not blank or jump.
     @st.fragment(run_every=REFRESH_SECONDS)
     def _live() -> None:
-        with live_slot.container():
-            _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac, max_loss)
+        _render_live(settings, destination, paused, capital, lots, stop_frac, target_frac, max_loss)
 
     _live()
 
@@ -325,21 +331,13 @@ def _paint_market(
         f'<div class="action">{title}</div><p>{body}</p></div>',
         unsafe_allow_html=True,
     )
+    # The three number tiles are drawn by the live_market_tiles() island above and
+    # update in the browser. Here we just publish their current values for its
+    # JavaScript to pick up on its next poll.
     high = f"{opening.high_boundary:,.0f}" if opening.ready else "after 9:30"
     low = f"{opening.low_boundary:,.0f}" if opening.ready else "after 9:30"
-    cards = [
-        ("Nifty", f"{spot:,.0f}" if spot else "—", ""),
-        ("Call above", high, ""),
-        ("Put below", low, ""),
-    ]
-    with level_box.container():
-        for column, (label, value, extra) in zip(st.columns(3), cards):
-            value_class = f"metric-value {extra}" if extra else "metric-value"
-            column.markdown(
-                f'<div class="metric-card"><div class="metric-label">{label}</div>'
-                f'<div class="{value_class}">{value}</div></div>',
-                unsafe_allow_html=True,
-            )
+    write_tile_state("nifty", spot, high, low)
+    _ = level_box  # retained for signature stability; no longer painted here
     flash = str(st.session_state.get("flash") or "")
     error = str(st.session_state.get("flash_error") or "")
     st.session_state.flash = ""
@@ -527,10 +525,14 @@ def _exit_locked(broker, settings: Settings, now: datetime) -> None:
         token = str(row.get("instrument_token") or "")
         symbol = str(row.get("Ticker") or "")
         if token and settings.upstox_configured:
-            try:
-                prices[symbol] = get_full_quote(token, access_token=settings.upstox_access_token).last_price
-            except Exception:
-                LOGGER.exception("Option quote failed for %s", symbol)
+            live = read_snapshot_price(token)
+            if live is not None:
+                prices[symbol] = live
+            else:
+                try:
+                    prices[symbol] = get_full_quote(token, access_token=settings.upstox_access_token).last_price
+                except Exception:
+                    LOGGER.exception("Option quote failed for %s", symbol)
         if symbol not in prices:
             prices[symbol] = float(row.get("ExecutionPrice") or 0.0)
     broker.mark_to_market(prices)
@@ -591,7 +593,10 @@ def _live_ready(settings: Settings) -> bool:
 def _load_index(settings: Settings) -> tuple[float, pd.DataFrame, str]:
     try:
         quote, candles = _cached_index(settings.upstox_access_token)
-        return quote.last_price, candles, ""
+        # Prefer the live streamed tick the instance loop writes; fall back to the
+        # cached REST quote when the loop is off or the tick is stale.
+        spot = read_snapshot_price(NIFTY_INDEX_KEY) or quote.last_price
+        return spot, candles, ""
     except Exception as exc:
         return 0.0, pd.DataFrame(), f"Nifty index feed failed: {exc}"
 

@@ -12,6 +12,8 @@ __pycache__/
 .streamlit/secrets.toml
 data/*.json
 data/banknifty/*.json
+static/*.json
+!static/.gitkeep
 data/*.xlsx
 data/banknifty/*.xlsx
 data/cache/

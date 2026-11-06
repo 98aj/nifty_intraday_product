@@ -37,46 +37,13 @@ class SizedOrder:
     cash_required: float
 
 
-def nearest_listed_expiry(rows: list[dict], today: date) -> str | None:
-    """Soonest expiry on or after `today`. A weekly flag does not jump the queue."""
-
-    future: list[date] = []
-    for row in rows:
-        raw = str(row.get("expiry") or "")
-        try:
-            stamp = date.fromisoformat(raw[:10])
-        except ValueError:
-            continue
-        if stamp >= today:
-            future.append(stamp)
-    if not future:
-        return None
-    return min(future).isoformat()
-
-
-def listed_lot_size(rows: list[dict], expiry: str) -> int | None:
-    """Exchange lot for that expiry, or None when the contract does not say."""
-
-    for row in rows:
-        if str(row.get("expiry") or "")[:10] != expiry:
-            continue
-        try:
-            size = int(float(row.get("lot_size") or 0))
-        except (TypeError, ValueError):
-            continue
-        if size > 0:
-            return size
-    return None
-
-
 def nearest_weekly_expiry(rows: list[dict], today: date) -> str | None:
     """Soonest expiry on or after `today` — the current contract.
 
     The exchange ``weekly`` flag is deliberately ignored here. An earlier
     version preferred weekly-flagged contracts, which could skip the genuinely
     nearest expiry and price a much costlier, farther-dated option. The desk
-    always trades the soonest listed expiry (same rule as
-    ``nearest_listed_expiry``).
+    always trades the soonest listed expiry.
     """
 
     future: list[date] = []
@@ -362,8 +329,8 @@ def manage_exit(
       as ``max(stop_premium, trailing_stop)``.
     * The fixed target is kept as an upper cap.
 
-    This is opt-in per desk: callers that pass no trailing arguments (Nifty and
-    Bank Nifty) get exactly the old behaviour.
+    This is opt-in: callers that pass no trailing arguments get exactly the old
+    fixed-rule behaviour.
     """
 
     if _clock(now) >= FLATTEN_AT:
