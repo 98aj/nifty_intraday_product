@@ -1,4 +1,4 @@
-"""MIS order routing. This module is unreachable from the Gemini copilot.
+"""MIS order routing.
 
 Every live order is forced to `product="I"` (intraday / MIS). Callers must
 pass an already-computed integer quantity from `calculate_position_size`.

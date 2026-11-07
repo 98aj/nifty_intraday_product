@@ -1,7 +1,6 @@
 """Environment-backed settings and the NSE session clock.
 
 Secrets are read from `os.environ` after an optional local `.env` load.
-Gemini is configured here and is never imported by the order router.
 """
 
 from __future__ import annotations
@@ -31,10 +30,14 @@ UPSTOX_HFT_BASE = "https://api-hft.upstox.com/v2"
 UPSTOX_AUTHORIZE_URL = "https://api.upstox.com/v2/login/authorization/dialog"
 UPSTOX_TOKEN_URL = "https://api.upstox.com/v2/login/authorization/token"
 
+ZERODHA_API_BASE = "https://api.kite.trade"
+ZERODHA_LOGIN_URL = "https://kite.trade/connect/login"
+
 DEFAULT_MAX_INR_RISK = 500.0
-DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 HTTP_TIMEOUT_SECONDS = 8.0
 DEFAULT_STRATEGY = "ORB_TIGHT"
+DEFAULT_ORDER_BROKER = "upstox"
+SUPPORTED_ORDER_BROKERS = {"upstox", "zerodha"}
 
 @dataclass(frozen=True)
 class Settings:
@@ -44,10 +47,12 @@ class Settings:
     upstox_secret_key: str
     upstox_access_token: str
     upstox_redirect_uri: str
-    gemini_api_key: str
-    gemini_model: str
     execution_mode: str
     active_strategy: str
+    order_broker: str = DEFAULT_ORDER_BROKER
+    zerodha_api_key: str = ""
+    zerodha_api_secret: str = ""
+    zerodha_access_token: str = ""
     max_inr_risk_default: float = DEFAULT_MAX_INR_RISK
 
     @property
@@ -59,8 +64,18 @@ class Settings:
         return bool(self.upstox_access_token)
 
     @property
-    def gemini_configured(self) -> bool:
-        return bool(self.gemini_api_key)
+    def zerodha_configured(self) -> bool:
+        return bool(
+            self.zerodha_api_key and self.zerodha_api_secret and self.zerodha_access_token
+        )
+
+    @property
+    def execution_broker_configured(self) -> bool:
+        """True when the broker selected for order execution has its credentials."""
+
+        if self.order_broker == "zerodha":
+            return self.zerodha_configured
+        return self.upstox_configured
 
 
 def _require_mode(raw: str) -> str:
@@ -68,6 +83,15 @@ def _require_mode(raw: str) -> str:
     if mode not in {"MOCK", "LIVE"}:
         raise ValueError("EXECUTION_MODE must be MOCK or LIVE")
     return mode
+
+
+def _require_order_broker(raw: str) -> str:
+    broker = (raw or DEFAULT_ORDER_BROKER).strip().lower()
+    if broker not in SUPPORTED_ORDER_BROKERS:
+        raise ValueError(
+            f"ORDER_BROKER must be one of {sorted(SUPPORTED_ORDER_BROKERS)}"
+        )
+    return broker
 
 
 def load_settings(dotenv_path: Path | None = None) -> Settings:
@@ -81,9 +105,10 @@ def load_settings(dotenv_path: Path | None = None) -> Settings:
         upstox_redirect_uri=os.environ.get(
             "UPSTOX_REDIRECT_URI", "http://127.0.0.1:8000/callback"
         ).strip(),
-        gemini_api_key=os.environ.get("GEMINI_API_KEY", "").strip(),
-        gemini_model=os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
-        or DEFAULT_GEMINI_MODEL,
         execution_mode=_require_mode(os.environ.get("EXECUTION_MODE", "MOCK")),
         active_strategy=(os.environ.get("ACTIVE_STRATEGY", DEFAULT_STRATEGY).strip().upper() or DEFAULT_STRATEGY),
+        order_broker=_require_order_broker(os.environ.get("ORDER_BROKER", DEFAULT_ORDER_BROKER)),
+        zerodha_api_key=os.environ.get("ZERODHA_API_KEY", "").strip(),
+        zerodha_api_secret=os.environ.get("ZERODHA_API_SECRET", "").strip(),
+        zerodha_access_token=os.environ.get("ZERODHA_ACCESS_TOKEN", "").strip(),
     )

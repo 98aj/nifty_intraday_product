@@ -19,7 +19,6 @@ from typing import Any, Iterator
 import pandas as pd
 
 from config.settings import IST, PROJECT_ROOT, Settings, load_settings
-from modules.copilot.option_quality import load_option_quality, quality_allows
 from modules.journal.trade_journal import TradeJournal
 from modules.options.selector import (
     OptionQuote,
@@ -122,8 +121,6 @@ def run_nifty_cycle(
     candles: pd.DataFrame,
     quotes: list[OptionQuote] | None = None,
     journal: TradeJournal | None = None,
-    gemini_ok: bool = True,
-    gemini_why: str = "",
     prices: dict[str, float] | None = None,
     place_order: Any = None,
     buy_tag: str = "NIFTY-OPT",
@@ -144,8 +141,6 @@ def run_nifty_cycle(
     allowed, why = entry_allowed(now, signal)
     if not allowed:
         return exit_note or why
-    if not gemini_ok:
-        return gemini_why or "Gemini skipped this break."
     if not quotes or signal not in {"BUY", "SELL"}:
         return "No at-the-money Nifty option."
     order, note = affordable_order(
@@ -238,14 +233,6 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
     signal = "SCANNING"
     if opening.ready and spot > 0:
         signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
-    view = load_option_quality(
-        now,
-        spot,
-        float(opening.high_boundary or 0),
-        float(opening.low_boundary or 0),
-        bool(opening.ready),
-    )
-    gemini_ok, gemini_why = quality_allows(signal, view)
     with desk_lock():
         return run_nifty_cycle(
             now=now,
@@ -255,8 +242,6 @@ def _nifty_live(settings: Settings, now: datetime) -> str:
             spot=spot,
             candles=candles,
             quotes=quotes if signal in {"BUY", "SELL"} else None,
-            gemini_ok=gemini_ok,
-            gemini_why=gemini_why,
         )
 
 
@@ -327,12 +312,8 @@ def _buy(broker, settings, controls, now, order, journal: TradeJournal, place_or
     if controls.get("destination") == "LIVE":
         send = place_order or _send_live
         placed = send(
-            instrument_token=order.contract.instrument_key,
-            side="BUY",
-            quantity=order.quantity,
-            symbol=order.contract.trading_symbol,
-            access_token=settings.upstox_access_token,
-            tag=tag,
+            _order_request(order.contract, "BUY", order.quantity, tag),
+            settings,
         )
         live_id = str(getattr(placed, "order_id", "") or "")
     filled = broker.fill(
@@ -396,14 +377,7 @@ def _exit_open(
                 continue
             send = place_order or _send_live
             try:
-                send(
-                    instrument_token=str(row.get("instrument_token") or ""),
-                    side="SELL",
-                    quantity=int(row.get("Quantity") or 0),
-                    symbol=symbol,
-                    access_token=settings.upstox_access_token,
-                    tag=tag,
-                )
+                send(_order_request_from_row(row, "SELL", tag), settings)
             except Exception as exc:
                 notes.append(f"Live exit failed for {symbol}: {exc}")
                 continue
@@ -443,10 +417,40 @@ def _live_prices(settings: Settings, rows: list[dict]) -> dict[str, float]:
     return prices
 
 
-def _send_live(**kwargs: Any) -> Any:
-    from modules.upstox.orders import place_mis_market_order
+def _order_request(contract, side: str, quantity: int, tag: str):
+    from modules.execution import OrderRequest
 
-    return place_mis_market_order(**kwargs)
+    return OrderRequest(
+        instrument_token=contract.instrument_key,
+        symbol=contract.trading_symbol,
+        side=side,
+        quantity=int(quantity),
+        tag=tag,
+        strike=float(contract.strike),
+        expiry=str(contract.expiry),
+        option_type=str(contract.option_type),
+    )
+
+
+def _order_request_from_row(row: dict, side: str, tag: str):
+    from modules.execution import OrderRequest
+
+    return OrderRequest(
+        instrument_token=str(row.get("instrument_token") or ""),
+        symbol=str(row.get("Ticker") or ""),
+        side=side,
+        quantity=int(row.get("Quantity") or 0),
+        tag=tag,
+        strike=float(row.get("strike") or 0.0),
+        expiry=str(row.get("expiry") or ""),
+        option_type=str(row.get("option_type") or ""),
+    )
+
+
+def _send_live(request: Any, settings: Settings) -> Any:
+    from modules.execution import get_execution_broker
+
+    return get_execution_broker(settings).place_order(request)
 
 
 def _live_ready(settings: Settings, controls: dict[str, Any]) -> bool:

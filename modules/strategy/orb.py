@@ -2,7 +2,7 @@
 
 Signal language is closed: ``BUY``, ``SELL``, or ``SCANNING``. Equality at
 either boundary stays ``SCANNING`` — a breakout requires a strict print
-through the range. This module has no I/O and no Gemini imports.
+through the range. This module has no I/O.
 """
 
 from __future__ import annotations

@@ -9,7 +9,6 @@ import pandas as pd
 import streamlit as st
 
 from config.settings import IST, Settings, load_settings
-from modules.copilot.option_quality import load_option_quality, quality_allows, quality_summary
 from modules.desk_loop import desk_lock, loop_caption, loop_is_fresh, market_is_open, save_desk_controls
 from modules.journal.trade_journal import TradeJournal, for_display, max_drawdown
 from modules.options.selector import (
@@ -30,7 +29,7 @@ from modules.ui.live_tiles import live_market_tiles, write_tile_state
 from modules.upstox.feed import read_snapshot_price
 from modules.upstox.market_data import get_full_quote, get_historical_candles
 from modules.upstox.option_chain import NIFTY_INDEX_KEY, fetch_nifty_contracts, fetch_option_chain
-from modules.upstox.orders import place_mis_market_order
+from modules.execution import OrderRequest, get_execution_broker
 
 LOGGER = logging.getLogger("desk")
 # The live view redraws on this timer. The instance loop, not this page, is the
@@ -93,7 +92,6 @@ def _render_live(
     broker = PaperTradingBroker()
     hero_box = st.empty()
     level_box = st.empty()
-    quality_box = st.empty()
     notice_box = st.empty()
 
     index_error = ""
@@ -111,15 +109,6 @@ def _render_live(
             signal = evaluate_market_signals(spot, opening.high_boundary, opening.low_boundary)
         contract, sample, chain_error = _load_contract(settings, spot, signal, now)
 
-    quality = load_option_quality(
-        now,
-        spot,
-        float(opening.high_boundary or 0),
-        float(opening.low_boundary or 0),
-        bool(opening.ready),
-    )
-    allowed_by_gemini, gemini_why = quality_allows(signal, quality)
-
     preview, lot_note = (None, "")
     if sample is not None:
         preview, lot_note = order_for_lots(sample, lots, capital, stop_frac, target_frac, max_loss)
@@ -127,7 +116,7 @@ def _render_live(
 
     if not loop_is_fresh(now):
         _mark_and_exit(broker, settings, destination, now)
-        if not paused and allowed_by_gemini:
+        if not paused:
             _maybe_enter(broker, settings, destination, now, signal, order)
 
     _paint_market(
@@ -144,12 +133,9 @@ def _render_live(
         now,
         index_error,
         chain_error,
-        allowed_by_gemini,
-        gemini_why,
     )
-    _show_quality(quality_box, quality)
     _show_lot_cost(sample, preview, lot_note, lots, max_loss, now)
-    _show_ticket(order, paused, broker, now, allowed_by_gemini)
+    _show_ticket(order, paused, broker, now)
     _render_book(broker, capital)
     st.caption(
         f"{DESTINATION_LABELS[destination]} · {now.strftime('%H:%M')} IST · sells by {FLATTEN_AT.strftime('%H:%M')}"
@@ -309,8 +295,6 @@ def _paint_market(
     now,
     index_error,
     chain_error,
-    allowed_by_gemini,
-    gemini_why,
 ) -> None:
     allowed, why = entry_allowed(now, signal)
     traded = _traded_today(broker, now)
@@ -323,8 +307,6 @@ def _paint_market(
         broker.open_positions(),
         allowed,
         why,
-        allowed_by_gemini,
-        gemini_why,
     )
     hero_box.markdown(
         f'<div class="hero {tone}"><div class="kicker">Right now</div>'
@@ -349,16 +331,8 @@ def _paint_market(
         notice_box.success(flash)
 
 
-def _show_quality(quality_box, quality) -> None:
-    title, body = quality_summary(quality)
-    quality_box.markdown(
-        f'<div class="guide-card"><h4>{title}</h4><p>{body}</p></div>',
-        unsafe_allow_html=True,
-    )
-
-
-def _show_ticket(order, paused, broker, now, allowed_by_gemini: bool) -> None:
-    if order is None or paused or not allowed_by_gemini or _traded_today(broker, now):
+def _show_ticket(order, paused, broker, now) -> None:
+    if order is None or paused or _traded_today(broker, now):
         return
     kind = "call" if order.contract.option_type == "CE" else "put"
     st.markdown(
@@ -372,7 +346,7 @@ def _show_ticket(order, paused, broker, now, allowed_by_gemini: bool) -> None:
 
 
 def _today_story(
-    paused, signal, order, lot_note, traded, opens, allowed, why, allowed_by_gemini, gemini_why
+    paused, signal, order, lot_note, traded, opens, allowed, why
 ) -> tuple[str, str, str]:
     if paused:
         return (
@@ -402,8 +376,6 @@ def _today_story(
         )
     if "14:30" in why:
         return ("Too late for a new buy", "New buys stop at 2:30 pm. Anything still open is sold by 3:15 pm.", "wait")
-    if signal in {"BUY", "SELL"} and order is not None and not allowed_by_gemini:
-        return ("Gemini skipped this break", gemini_why or "The open does not match Gemini's view.", "stop")
     if signal == "BUY" and order is not None:
         return (
             "Nifty broke up",
@@ -474,13 +446,17 @@ def _enter_locked(broker, settings: Settings, destination: str, now: datetime, s
     live_id = ""
     if destination == LIVE:
         try:
-            placed = place_mis_market_order(
-                instrument_token=order.contract.instrument_key,
-                side="BUY",
-                quantity=order.quantity,
-                symbol=order.contract.trading_symbol,
-                access_token=settings.upstox_access_token,
-                tag="NIFTY-OPT",
+            placed = get_execution_broker(settings).place_order(
+                OrderRequest(
+                    instrument_token=order.contract.instrument_key,
+                    symbol=order.contract.trading_symbol,
+                    side="BUY",
+                    quantity=order.quantity,
+                    tag="NIFTY-OPT",
+                    strike=float(order.contract.strike),
+                    expiry=str(order.contract.expiry),
+                    option_type=str(order.contract.option_type),
+                )
             )
             live_id = placed.order_id
         except Exception as exc:
@@ -561,13 +537,17 @@ def _sell_live(row: dict, settings: Settings) -> bool:
         st.session_state.flash_error = "Live sell skipped — EXECUTION_MODE is MOCK."
         return False
     try:
-        place_mis_market_order(
-            instrument_token=str(row.get("instrument_token") or ""),
-            side="SELL",
-            quantity=int(row.get("Quantity") or 0),
-            symbol=str(row.get("Ticker") or ""),
-            access_token=settings.upstox_access_token,
-            tag="OPT-EXIT",
+        get_execution_broker(settings).place_order(
+            OrderRequest(
+                instrument_token=str(row.get("instrument_token") or ""),
+                symbol=str(row.get("Ticker") or ""),
+                side="SELL",
+                quantity=int(row.get("Quantity") or 0),
+                tag="OPT-EXIT",
+                strike=float(row.get("strike") or 0.0),
+                expiry=str(row.get("expiry") or ""),
+                option_type=str(row.get("option_type") or ""),
+            )
         )
         return True
     except Exception as exc:

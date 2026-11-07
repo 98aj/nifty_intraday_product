@@ -17,7 +17,7 @@ def test_options_desk_renders_without_stock_scanner() -> None:
     markdown = " ".join(str(block.value) for block in app.markdown)
     assert "Nifty weekly options" in markdown
     assert "Nifty 50 ticker" not in markdown
-    assert "Gemini" in markdown
+    assert "Gemini" not in markdown
     labels = [str(item.label) for item in app.number_input]
     assert any("capital" in label.lower() for label in labels)
 

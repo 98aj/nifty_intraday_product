@@ -17,8 +17,6 @@ def _settings() -> Settings:
         upstox_secret_key="",
         upstox_access_token="token",
         upstox_redirect_uri="http://127.0.0.1:8000/callback",
-        gemini_api_key="",
-        gemini_model="gemini-2.5-flash",
         execution_mode="MOCK",
         active_strategy="ORB_TIGHT",
     )
@@ -66,7 +64,6 @@ def test_nifty_rule_still_buys_the_midday_breakdown(tmp_path) -> None:
         candles=_candles(),
         quotes=[OptionQuote("K", "NIFTY 22950 PE 2026-10-19", "2026-10-19", 22950, "PE", 65, 60.3)],
         journal=TradeJournal(tmp_path / "journal"),
-        gemini_ok=True,
     )
     assert "PAPER BUY" in reason
     assert broker.open_positions()[0]["Quantity"] == 65
@@ -83,7 +80,6 @@ def test_nifty_rule_still_refuses_after_1430(tmp_path) -> None:
         candles=_candles(),
         quotes=[OptionQuote("K", "NIFTY 22900 PE 2026-10-19", "2026-10-19", 22900, "PE", 65, 11.0)],
         journal=TradeJournal(tmp_path / "journal"),
-        gemini_ok=True,
     )
     assert "14:30" in reason
     assert broker.open_positions() == []
